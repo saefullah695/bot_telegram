@@ -1,5 +1,5 @@
 google-cloud-bigquery
 google-cloud-vision
-python-telegram-bot
+python-telegram-bot[webhooks]
 pandas
 python-dotenv
