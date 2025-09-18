@@ -2,6 +2,8 @@ import os
 import re
 import pandas as pd
 import json
+import threading
+import time
 from google.cloud import bigquery
 from google.cloud import vision
 from google.cloud.vision import ImageAnnotatorClient
@@ -10,7 +12,6 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from typing import List, Tuple
 import logging
 import datetime
-import asyncio
 
 # Setup logging dengan format yang lebih detail
 logging.basicConfig(
@@ -539,8 +540,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =======================
 # 🚀 MAIN
 # =======================
-def main():
-    """Fungsi utama untuk menjalankan bot"""
+def run_bot():
+    """Fungsi untuk menjalankan bot"""
     try:
         logger.info("Membuat aplikasi bot...")
         app = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -569,17 +570,18 @@ def main():
             logger.info(f"Setting webhook to: {webhook_url}")
             
             # Hapus webhook yang mungkin sudah ada
-            asyncio.run(app.bot.delete_webhook())
+            app.bot.delete_webhook()
             
             # Set webhook baru
-            asyncio.run(app.bot.set_webhook(url=webhook_url))
+            app.bot.set_webhook(url=webhook_url)
             
             # Jalankan aplikasi dengan webhook
             app.run_webhook(
                 listen="0.0.0.0",
                 port=PORT,
                 url_path=TELEGRAM_TOKEN,
-                webhook_url=webhook_url
+                webhook_url=webhook_url,
+                drop_pending_updates=True
             )
         else:
             logger.info("RAILWAY_PUBLIC_URL tidak tersedia, menggunakan polling")
@@ -587,6 +589,22 @@ def main():
        
     except Exception as e:
         logger.error(f"Error menjalankan bot: {e}")
+
+def main():
+    """Fungsi utama untuk menjalankan bot dengan threading"""
+    try:
+        # Jalankan bot di thread terpisah untuk menghindari masalah event loop
+        bot_thread = threading.Thread(target=run_bot)
+        bot_thread.daemon = True
+        bot_thread.start()
+        
+        # Keep main thread alive
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Bot dihentikan oleh pengguna")
+    except Exception as e:
+        logger.error(f"Error di main: {e}")
 
 if __name__ == "__main__":
     main()
