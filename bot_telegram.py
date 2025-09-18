@@ -3,6 +3,7 @@ import re
 import pandas as pd
 import json
 import asyncio
+import uuid
 from google.cloud import bigquery
 from google.cloud import vision
 from google.cloud.vision import ImageAnnotatorClient
@@ -31,10 +32,6 @@ RAILWAY_PUBLIC_URL = os.getenv("RAILWAY_PUBLIC_URL", "https://bottelegram-produc
 if not all([PROJECT_ID, DATASET_ID, TABLE_ID, TELEGRAM_TOKEN]):
     logger.error("Satu atau lebih environment variables tidak ditemukan")
     exit(1)
-
-# Bersihkan RAILWAY_PUBLIC_URL dari trailing slash
-if RAILWAY_PUBLIC_URL:
-    RAILWAY_PUBLIC_URL = RAILWAY_PUBLIC_URL.rstrip('/')
 
 TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 
@@ -76,7 +73,7 @@ bq_client, vision_client = initialize_services()
 # ⚙️ FUNGSI UTAMA
 # =======================
 def simpan_soal(soal: str, jawaban: str, source: str = "manual") -> bool:
-    """Simpan soal ke BigQuery (hindari duplikat)"""
+    """Simpan soal ke BigQuery dengan skema baru"""
     try:
         soal, jawaban = str(soal).strip(), str(jawaban).strip()
         if not soal or not jawaban:
@@ -107,18 +104,23 @@ def simpan_soal(soal: str, jawaban: str, source: str = "manual") -> bool:
                 logger.info(f"Soal sudah ada di database: {soal}")
                 return False
        
-        # Simpan ke BigQuery
+        # Generate ID unik dan timestamp
+        unique_id = str(uuid.uuid4())
+        timestamp = datetime.datetime.utcnow().isoformat()
+       
+        # Simpan ke BigQuery dengan skema baru
         rows_to_insert = [{
+            "id": unique_id,
             "question": soal,
             "question_normalized": soal_normalized,
             "answer": jawaban,
             "source": source,
-            "created_at": datetime.datetime.now().isoformat()
+            "timestamp": timestamp
         }]
        
         errors = bq_client.insert_rows_json(TABLE_REF, rows_to_insert)
         if not errors:
-            logger.info(f"Berhasil menyimpan soal: {soal}")
+            logger.info(f"Berhasil menyimpan soal dengan ID {unique_id}: {soal}")
             return True
         else:
             logger.error(f"Error menyimpan soal ke BigQuery: {errors}")
@@ -569,7 +571,6 @@ async def main():
        
         # Setup webhook jika RAILWAY_PUBLIC_URL tersedia
         if RAILWAY_PUBLIC_URL:
-            # Format webhook URL dengan benar
             webhook_url = f"{RAILWAY_PUBLIC_URL}/webhook/{TELEGRAM_TOKEN}"
             logger.info(f"Setting webhook to: {webhook_url}")
             
