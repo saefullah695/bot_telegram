@@ -1,64 +1,59 @@
-# Bank Soal Telegram Bot
+# Bot Telegram Pencari Jawaban
 
-Bot Telegram untuk mengelola bank soal dengan integrasi Google BigQuery dan Google Vision OCR.
+Bot Telegram untuk mencari dan menambahkan soal serta jawaban ke database BigQuery.
 
 ## Fitur
 
-- Menambahkan soal dan jawaban secara manual
-- Import soal dari file CSV/Excel
-- OCR untuk mengekstrak soal dari gambar
-- Pencarian jawaban dari bank soal
-- Integrasi dengan Google BigQuery dan Google Vision API
-
-## Deployment di Railway
-
-Domain: `bottelegram-production-b4c8.up.railway.app`
-
-1. Fork repository ini
-2. Buat project baru di Railway
-3. Connect dengan repository GitHub Anda
-4. Tambahkan environment variables yang diperlukan:
-   - `TELEGRAM_BOT_TOKEN`: Token bot Telegram
-   - `PROJECT_ID`: Google Cloud Project ID
-   - `DATASET_ID`: BigQuery Dataset ID
-   - `TABLE_ID`: BigQuery Table ID
-   - `SERVICE_ACCOUNT_JSON`: Service account JSON key untuk Google Cloud
-5. Deploy aplikasi
-
-## Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `TELEGRAM_BOT_TOKEN` | Token bot Telegram dari @BotFather |
-| `PROJECT_ID` | Google Cloud Project ID |
-| `DATASET_ID` | BigQuery Dataset ID |
-| `TABLE_ID` | BigQuery Table ID |
-| `SERVICE_ACCOUNT_JSON` | Service account JSON key untuk Google Cloud |
-| `RAILWAY_PUBLIC_URL` | URL public Railway (otomatis) |
-| `PORT` | Port untuk webhook (default: 8443) |
-
-## Command Bot
-
-- `/start` - Memulai bot dan menampilkan panduan
-- `/tambah soal=jawaban` - Menambah soal manual
-- `/ocr` - Melakukan OCR pada gambar yang dibalas
-- Upload file CSV/Excel - Import soal otomatis
-- Kirim pertanyaan teks - Mencari jawaban dari bank soal
-- Kirim gambar soal - Mencari jawaban dengan OCR
+- Mencari jawaban dari pertanyaan teks
+- Mencari jawaban dari gambar (OCR)
+- Menambah soal dan jawaban ke database
+- Memproses file CSV untuk menambah data dalam jumlah banyak
 
 ## Struktur Database
 
-Tabel BigQuery harus memiliki schema berikut:
+Tabel BigQuery memiliki struktur berikut:
 
-| Field | Type | Mode |
-|-------|------|------|
-| id | STRING | REQUIRED |
-| question | STRING | REQUIRED |
-| question_normalized | STRING | REQUIRED |
-| answer | STRING | REQUIRED |
-| source | STRING | NULLABLE |
-| timestamp | TIMESTAMP | REQUIRED |
+| Kolom | Tipe | Deskripsi |
+|-------|------|-----------|
+| id | STRING | ID unik (UUID) |
+| question | STRING | Pertanyaan asli |
+| question_normalized | STRING | Pertanyaan yang dinormalisasi |
+| answer | STRING | Jawaban |
+| source | STRING | Sumber data |
+| timestamp | TIMESTAMP | Waktu dibuat |
 
-## Build Configuration
+## Cara Menjalankan di Railway
 
-Aplikasi ini menggunakan Heroku Buildpacks untuk deployment di Railway, bukan Nixpacks yang sudah deprecated.
+1. Fork repository ini ke GitHub account Anda
+2. Buat akun Railway jika belum punya
+3. Hubungkan Railway dengan repository GitHub Anda
+4. Tambahkan environment variables di Railway:
+   - `TELEGRAM_BOT_TOKEN`: Token bot Telegram dari @BotFather
+   - `SERVICE_ACCOUNT_JSON`: JSON credentials Google Cloud Service Account
+   - `PROJECT_ID`: Google Cloud Project ID
+   - `DATASET_ID`: BigQuery Dataset ID
+   - `TABLE_ID`: BigQuery Table ID
+
+5. Deploy otomatis akan dilakukan oleh Railway
+
+## Environment Variables
+
+| Variable | Deskripsi | Contoh |
+|----------|-----------|--------|
+| TELEGRAM_BOT_TOKEN | Token bot Telegram | 123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11 |
+| SERVICE_ACCOUNT_JSON | JSON service account Google Cloud | {"type": "service_account", ...} |
+| PROJECT_ID | Google Cloud Project ID | my-project-id |
+| DATASET_ID | BigQuery Dataset ID | my_dataset |
+| TABLE_ID | BigQuery Table ID | banksoal |
+
+## Cara Penggunaan
+
+1. Mulai bot dengan perintah `/start`
+2. Untuk mencari jawaban, ketik pertanyaan langsung
+3. Untuk mencari jawaban dari gambar, kirim gambar berisi pertanyaan
+4. Untuk menambah soal, gunakan `/tambah [soal] | [jawaban]`
+5. Untuk memproses file, kirim file CSV dengan kolom question dan answer
+
+## Format File CSV
+
+File CSV harus memiliki header dengan kolom yang mengandung kata "question" dan "answer", contoh:
