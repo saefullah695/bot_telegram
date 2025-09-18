@@ -26,7 +26,11 @@ DATASET_ID = os.getenv("DATASET_ID")
 TABLE_ID = os.getenv("TABLE_ID")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 PORT = int(os.getenv("PORT", "8443"))
-RAILWAY_PUBLIC_URL = os.getenv("RAILWAY_PUBLIC_URL", "https://bottelegram-production-b4c8.up.railway.app")
+RAILWAY_PUBLIC_URL = os.getenv("RAILWAY_PUBLIC_URL", "bottelegram-production-b4c8.up.railway.app")
+
+# Pastikan URL diawali dengan https://
+if not RAILWAY_PUBLIC_URL.startswith('http'):
+    RAILWAY_PUBLIC_URL = f"https://{RAILWAY_PUBLIC_URL}"
 
 # Validasi environment variables
 if not all([PROJECT_ID, DATASET_ID, TABLE_ID, TELEGRAM_TOKEN]):
@@ -571,6 +575,8 @@ async def main():
        
         # Setup webhook jika RAILWAY_PUBLIC_URL tersedia
         if RAILWAY_PUBLIC_URL:
+            # Pastikan URL tidak memiliki trailing slash
+            RAILWAY_PUBLIC_URL = RAILWAY_PUBLIC_URL.rstrip('/')
             webhook_url = f"{RAILWAY_PUBLIC_URL}/webhook/{TELEGRAM_TOKEN}"
             logger.info(f"Setting webhook to: {webhook_url}")
             
