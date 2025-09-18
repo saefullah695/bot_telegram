@@ -4,7 +4,7 @@ import io
 import json
 import logging
 import datetime
-import pandas as pd
+import csv
 from tempfile import NamedTemporaryFile
 from typing import List, Tuple
 
@@ -181,6 +181,39 @@ def find_answer_from_question(question: str) -> str:
         logger.error(f"Error mencari jawaban: {e}")
         return "Terjadi error saat mencari jawaban."
 
+def process_csv_file(file_bytes: bytes) -> int:
+    """Memproses file CSV tanpa menggunakan pandas"""
+    try:
+        # Decode bytes to string
+        content = file_bytes.decode('utf-8')
+        csv_reader = csv.reader(io.StringIO(content))
+        
+        # Read header
+        headers = next(csv_reader, [])
+        if not headers:
+            return 0
+            
+        # Find question and answer columns
+        question_cols, answer_cols = find_question_answer_columns(headers)
+        
+        if not question_cols or not answer_cols:
+            return 0
+            
+        # Process rows
+        count_success = 0
+        for row in csv_reader:
+            if len(row) > max(question_cols[0], answer_cols[0]):
+                soal = row[question_cols[0]].strip()
+                jawaban = row[answer_cols[0]].strip()
+                
+                if soal and jawaban and simpan_soal(soal, jawaban, "csv_upload"):
+                    count_success += 1
+                    
+        return count_success
+    except Exception as e:
+        logger.error(f"Error processing CSV: {e}")
+        return 0
+
 # =======================
 # 🤖 TELEGRAM BOT HANDLER
 # =======================
@@ -197,7 +230,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "1. Mencari jawaban dari pertanyaan teks - langsung ketik pertanyaan Anda\n"
             "2. Mencari jawaban dari gambar - kirim gambar berisi pertanyaan\n"
             "3. Menambah soal dan jawaban ke database - gunakan /tambah\n"
-            "4. Memproses file Excel/CSV - kirim file tersebut\n\n"
+            "4. Memproses file CSV - kirim file tersebut\n\n"
             "Gunakan /help untuk info lebih lanjut."
         )
         
@@ -220,7 +253,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Cara penggunaan:\n"
             "1. Untuk mencari jawaban, ketik langsung pertanyaan Anda\n"
             "2. Untuk mencari jawaban dari gambar, kirim gambar berisi pertanyaan\n"
-            "3. Untuk menambah data, gunakan /tambah atau kirim file Excel/CSV"
+            "3. Untuk menambah data, gunakan /tambah atau kirim file CSV"
         )
         
         await update.message.reply_text(help_text)
@@ -348,15 +381,20 @@ async def ocr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error di command /ocr: {e}")
         await update.message.reply_text("Terjadi error saat melakukan OCR. Silakan coba lagi nanti.")
 
-# Upload file (CSV/Excel/Gambar)
+# Upload file (CSV)
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk upload file"""
+    """Handler untuk upload file CSV"""
     try:
         user = update.effective_user
         file = update.message.document
         filename = file.file_name
         file_size = file.file_size
         logger.info(f"User {user.username} ({user.id}) mengupload file: {filename} ({file_size} bytes)")
+        
+        # Hanya terima file CSV
+        if not filename.endswith('.csv'):
+            await update.message.reply_text("Hanya file CSV yang didukung.")
+            return
         
         # Tampilkan status sedang memproses
         await update.message.reply_chat_action(action="typing")
@@ -365,46 +403,13 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_obj = await context.bot.get_file(file.file_id)
         file_bytes = await file_obj.download_as_bytearray()
         
-        # Proses berdasarkan tipe file
-        if filename.endswith(('.csv', '.xlsx', '.xls')):
-            # Proses file CSV/Excel
-            try:
-                if filename.endswith('.csv'):
-                    df = pd.read_csv(io.BytesIO(file_bytes))
-                else:
-                    df = pd.read_excel(io.BytesIO(file_bytes))
-                
-                # Cari kolom soal dan jawaban
-                question_cols, answer_cols = find_question_answer_columns(df.columns.tolist())
-                
-                if not question_cols or not answer_cols:
-                    await update.message.reply_text("Tidak dapat menemukan kolom soal dan jawaban. Pastikan file memiliki kolom dengan nama 'soal' dan 'jawaban'.")
-                    return
-                
-                # Simpan data ke database
-                count_success = 0
-                for _, row in df.iterrows():
-                    soal = str(row.iloc[question_cols[0]]) if question_cols else ""
-                    jawaban = str(row.iloc[answer_cols[0]]) if answer_cols else ""
-                    
-                    if soal and jawaban and simpan_soal(soal, jawaban, f"file_{filename}"):
-                        count_success += 1
-                
-                await update.message.reply_text(f"File berhasil diproses. {count_success} soal ditambahkan ke database.")
-                
-            except Exception as e:
-                logger.error(f"Error memproses file: {e}")
-                await update.message.reply_text("Gagal memproses file. Pastikan format file benar.")
+        # Proses file CSV
+        count_success = process_csv_file(file_bytes)
         
+        if count_success > 0:
+            await update.message.reply_text(f"File berhasil diproses. {count_success} soal ditambahkan ke database.")
         else:
-            # Proses sebagai gambar (OCR)
-            teks_hasil_ocr = ocr_with_google_vision(bytes(file_bytes))
-            
-            if not teks_hasil_ocr:
-                await update.message.reply_text("Tidak dapat membaca teks dari file. Pastikan file berisi teks yang jelas.")
-                return
-            
-            await update.message.reply_text(f"Hasil OCR:\n\n{teks_hasil_ocr}")
+            await update.message.reply_text("Gagal memproses file. Pastikan format file benar dan memiliki kolom 'soal' dan 'jawaban'.")
             
     except Exception as e:
         logger.error(f"Error handling file: {e}")
@@ -458,6 +463,4 @@ def main():
         logger.error(f"Error in main: {e}")
 
 if __name__ == "__main__":
-    main()        
-
-
+    main()
