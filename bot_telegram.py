@@ -2,6 +2,7 @@ import os
 import re
 import pandas as pd
 import json
+import asyncio
 from google.cloud import bigquery
 from google.cloud import vision
 from google.cloud.vision import ImageAnnotatorClient
@@ -538,7 +539,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =======================
 # 🚀 MAIN
 # =======================
-def main():
+async def main():
     """Fungsi utama untuk menjalankan bot"""
     try:
         logger.info("Membuat aplikasi bot...")
@@ -568,13 +569,13 @@ def main():
             logger.info(f"Setting webhook to: {webhook_url}")
             
             # Hapus webhook yang mungkin sudah ada
-            app.bot.delete_webhook()
+            await app.bot.delete_webhook()
             
             # Set webhook baru
-            app.bot.set_webhook(url=webhook_url)
+            await app.bot.set_webhook(url=webhook_url)
             
             # Jalankan aplikasi dengan webhook
-            app.run_webhook(
+            await app.run_webhook(
                 listen="0.0.0.0",
                 port=PORT,
                 url_path=TELEGRAM_TOKEN,
@@ -583,10 +584,10 @@ def main():
             )
         else:
             logger.info("RAILWAY_PUBLIC_URL tidak tersedia, menggunakan polling")
-            app.run_polling()
+            await app.run_polling()
         
     except Exception as e:
         logger.error(f"Error menjalankan bot: {e}")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
