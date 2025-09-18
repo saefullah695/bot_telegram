@@ -58,3 +58,7 @@ Tabel BigQuery harus memiliki schema berikut:
 | answer | STRING | REQUIRED |
 | source | STRING | NULLABLE |
 | timestamp | TIMESTAMP | REQUIRED |
+
+## Build Configuration
+
+Aplikasi ini menggunakan Heroku Buildpacks untuk deployment di Railway, bukan Nixpacks yang sudah deprecated.
