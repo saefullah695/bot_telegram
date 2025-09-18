@@ -60,14 +60,11 @@ def initialize_services():
         raise
 
 def normalize_question(question: str) -> str:
-    """Normalisasi pertanyaan untuk pencarian: lowercase, hapus karakter khusus, hapus spasi berlebihan"""
+    """Normalisasi pertanyaan untuk pencarian"""
     try:
-        # Ubah ke lowercase
-        normalized = question.lower()
-        # Hapus karakter khusus (selain huruf, angka, dan spasi)
-        normalized = re.sub(r'[^\w\s]', '', normalized)
-        # Ganti multiple spaces dengan single space
-        normalized = re.sub(r'\s+', ' ', normalized)
+        # Hapus karakter khusus, ubah ke lowercase, dan hapus spasi berlebih
+        normalized = re.sub(r'[^\w\s]', '', question.lower())  # Hapus karakter khusus
+        normalized = re.sub(r'\s+', ' ', normalized)  # Hapus spasi berlebih
         return normalized.strip()
     except Exception as e:
         logger.error(f"Error normalisasi pertanyaan: {e}")
@@ -115,7 +112,7 @@ def simpan_soal(question: str, answer: str, source: str = "manual") -> bool:
             "question_normalized": question_normalized,
             "answer": answer,
             "source": source,
-            "timestamp": datetime.datetime.utcnow().isoformat() + "Z"  # Format ISO dengan timezone Z (UTC)
+            "timestamp": datetime.datetime.utcnow().isoformat() + "Z"
         }]
 
         errors = bq_client.insert_json(TABLE_REF, rows_to_insert)
@@ -191,7 +188,6 @@ def find_answer_from_question(question: str) -> str:
         # Normalisasi pertanyaan untuk pencarian
         question_normalized = normalize_question(question)
         
-        # Pertama coba exact match
         query = """
         SELECT answer 
         FROM `{0}` 
@@ -211,7 +207,7 @@ def find_answer_from_question(question: str) -> str:
         if results:
             return results[0].answer
         
-        # Jika tidak ditemukan exact match, cari dengan LIKE (partial match)
+        # Jika tidak ditemukan exact match, cari dengan LIKE
         query_like = """
         SELECT answer 
         FROM `{0}` 
