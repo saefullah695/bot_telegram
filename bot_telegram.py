@@ -1,17 +1,18 @@
-﻿import os
+import os
 import re
 import io
+import json
+import logging
+import datetime
 import pandas as pd
+from tempfile import NamedTemporaryFile
+from typing import List, Tuple
+
 from google.cloud import bigquery
 from google.cloud import vision
 from google.cloud.vision import ImageAnnotatorClient
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from typing import List, Tuple
-import logging
-import datetime
-import json
-from tempfile import NamedTemporaryFile
 
 # Setup logging dengan format yang lebih detail
 logging.basicConfig(
@@ -26,11 +27,17 @@ DATASET_ID = os.getenv("DATASET_ID", "bot_telegram_gabung")
 TABLE_ID = os.getenv("TABLE_ID", "banksoal")
 TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 
+# Global clients
+bq_client = None
+vision_client = None
+
 # =======================
 # 🔑 SETUP BIGQUERY & GOOGLE VISION
 # =======================
+
 def initialize_services():
     """Inisialisasi BigQuery dan Google Vision Client"""
+    global bq_client, vision_client
     try:
         # Gunakan environment variable untuk service account
         service_account_info = os.getenv("SERVICE_ACCOUNT_JSON")
@@ -41,25 +48,22 @@ def initialize_services():
                 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_file.name
         else:
             logger.warning("SERVICE_ACCOUNT_JSON tidak ditemukan di environment variables")
+            # Coba gunakan default credentials (untuk environment seperti Railway)
+            # Railway akan secara otomatis menyediakan credentials melalui environment variables
         
-        # Inisialisasi BigQuery client
-        bq_client = bigquery.Client()
-        
-        # Inisialisasi Vision client
+        # Inisialisasi clients
+        bq_client = bigquery.Client(project=PROJECT_ID)
         vision_client = vision.ImageAnnotatorClient()
-        
-        logger.info("Berhasil menginisialisasi BigQuery dan Vision client")
+        logger.info("BigQuery dan Vision clients berhasil diinisialisasi")
         return bq_client, vision_client
     except Exception as e:
         logger.error(f"Gagal menginisialisasi services: {e}")
         raise
 
-# Inisialisasi services
-bq_client, vision_client = initialize_services()
-
 # =======================
 # ⚙️ FUNGSI UTAMA
 # =======================
+
 def simpan_soal(soal: str, jawaban: str, source: str = "manual") -> bool:
     """Simpan soal ke BigQuery (hindari duplikat)"""
     try:
@@ -67,47 +71,35 @@ def simpan_soal(soal: str, jawaban: str, source: str = "manual") -> bool:
         if not soal or not jawaban:
             logger.warning("Soal atau jawaban kosong, tidak disimpan")
             return False
-       
-        # Normalisasi teks untuk menghindari duplikat karena perbedaan kapitalisasi/spasi
-        soal_normalized = re.sub(r'\s+', ' ', soal.lower())
-        
-        # Cek duplikat di BigQuery
+
+        # Cek duplikat
         query = f"""
         SELECT COUNT(*) as count 
         FROM `{TABLE_REF}` 
-        WHERE question_normalized = @question_normalized
+        WHERE LOWER(soal) = LOWER('{soal.replace("'", "''")}')
         """
+        query_job = bq_client.query(query)
+        result = list(query_job.result())[0]
         
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("question_normalized", "STRING", soal_normalized)
-            ]
-        )
-        
-        query_job = bq_client.query(query, job_config=job_config)
-        results = query_job.result()
-        
-        for row in results:
-            if row.count > 0:
-                logger.info(f"Soal sudah ada di database: {soal}")
-                return False
-       
-        # Simpan ke BigQuery
+        if result.count > 0:
+            logger.info("Soal sudah ada di database, tidak disimpan lagi")
+            return False
+
+        # Insert data baru
         rows_to_insert = [{
-            "question": soal,
-            "question_normalized": soal_normalized,
-            "answer": jawaban,
+            "soal": soal,
+            "jawaban": jawaban,
             "source": source,
             "created_at": datetime.datetime.now().isoformat()
         }]
-        
-        errors = bq_client.insert_rows_json(TABLE_REF, rows_to_insert)
-        if not errors:
-            logger.info(f"Berhasil menyimpan soal: {soal}")
-            return True
-        else:
-            logger.error(f"Error menyimpan soal ke BigQuery: {errors}")
+
+        errors = bq_client.insert_json(TABLE_REF, rows_to_insert)
+        if errors:
+            logger.error(f"Error inserting row: {errors}")
             return False
+        
+        logger.info("Soal berhasil disimpan ke database")
+        return True
     except Exception as e:
         logger.error(f"Error menyimpan soal: {e}")
         return False
@@ -115,29 +107,28 @@ def simpan_soal(soal: str, jawaban: str, source: str = "manual") -> bool:
 def parse_qa_text(text: str) -> List[Tuple[str, str]]:
     """Parse teks untuk mengekstrak soal dan jawaban"""
     questions_answers = []
-   
-    # Beberapa pola yang mungkin untuk mendeteksi soal dan jawaban
-    patterns = [
-        (r'Soal[:\s]*([^Jawaban]+)Jawaban[:\s]*(.+)', re.IGNORECASE),
-        (r'(\d+\.\s*[^?]+\?)\s*Jawab[:\s]*(.+)', re.IGNORECASE),
-        (r'([^?]+\?)\s*Jawaban[:\s]*(.+)', re.IGNORECASE),
-    ]
-   
-    for line in text.split('\n'):
-        line = line.strip()
-        if not line:
-            continue
-           
-        for pattern, flags in patterns:
-            match = re.search(pattern, line, flags)
-            if match:
-                question = match.group(1).strip()
-                answer = match.group(2).strip()
+    try:
+        # Pattern untuk mendeteksi format Q: dan A:
+        pattern = r'(?i)(Q:|Pertanyaan:|Soal:)\s*(.*?)(?=(?:A:|Jawaban:|$))(?:\s*(?:A:|Jawaban:)\s*(.*))?'
+        matches = re.findall(pattern, text, re.DOTNAME)
+        
+        for match in matches:
+            question = match[1].strip()
+            answer = match[2].strip() if len(match) > 2 and match[2] else ""
+            
+            if question and answer:
                 questions_answers.append((question, answer))
-                logger.debug(f"Ditemukan pasangan soal-jawaban: {question} -> {answer}")
-                break
-               
-    logger.info(f"Berhasil memparsing {len(questions_answers)} pasangan soal-jawaban dari teks")
+        
+        # Jika tidak ada pattern Q:A, coba split dengan baris baru
+        if not questions_answers and "\n" in text:
+            lines = text.split("\n")
+            for i in range(len(lines)-1):
+                if lines[i].strip() and lines[i+1].strip():
+                    questions_answers.append((lines[i].strip(), lines[i+1].strip()))
+    
+    except Exception as e:
+        logger.error(f"Error parsing teks: {e}")
+    
     return questions_answers
 
 def ocr_with_google_vision(image_content: bytes) -> str:
@@ -145,113 +136,97 @@ def ocr_with_google_vision(image_content: bytes) -> str:
     try:
         image = vision.Image(content=image_content)
         response = vision_client.document_text_detection(image=image)
-       
-        # Ekstrak teks dari hasil OCR
-        extracted_text = ""
-        for page in response.full_text_annotation.pages:
-            for block in page.blocks:
-                for paragraph in block.paragraphs:
-                    for word in paragraph.words:
-                        word_text = "".join([symbol.text for symbol in word.symbols])
-                        extracted_text += word_text + " "
-                    extracted_text += "\n"
-       
+        
         if response.error.message:
-            logger.error(f"Google Vision API error: {response.error.message}")
+            logger.error(f"Error OCR: {response.error.message}")
             return ""
-           
-        logger.info(f"Berhasil mengekstrak teks dari gambar dengan panjang {len(extracted_text)} karakter")
-        return extracted_text
+        
+        return response.text_annotations[0].text if response.text_annotations else ""
     except Exception as e:
-        logger.error(f"Error selama proses OCR: {e}")
+        logger.error(f"Error dalam OCR: {e}")
         return ""
 
 def find_question_answer_columns(headers: List[str]) -> Tuple[List[int], List[int]]:
     """Mencari indeks kolom yang mengandung 'soal' dan 'jawaban' dalam header"""
     question_indices = []
     answer_indices = []
-   
-    # Normalisasi header untuk pencarian
-    normalized_headers = [header.lower().strip() for header in headers]
-    logger.debug(f"Header kolom: {headers}")
-   
-    # Cari kolom yang mengandung kata 'soal'
-    for i, header in enumerate(normalized_headers):
-        if 'soal' in header or 'pertanyaan' in header:
+    
+    for i, header in enumerate(headers):
+        header_lower = header.lower()
+        if any(keyword in header_lower for keyword in ['soal', 'pertanyaan', 'question']):
             question_indices.append(i)
-            logger.debug(f"Ditemukan kolom soal di indeks {i}: {headers[i]}")
-   
-    # Cari kolom yang mengandung kata 'jawaban'
-    for i, header in enumerate(normalized_headers):
-        if 'jawaban' in header or 'kunci' in header or 'answer' in header:
+        if any(keyword in header_lower for keyword in ['jawaban', 'answer', 'kunci']):
             answer_indices.append(i)
-            logger.debug(f"Ditemukan kolom jawaban di indeks {i}: {headers[i]}")
-   
-    logger.info(f"Ditemukan {len(question_indices)} kolom soal dan {len(answer_indices)} kolom jawaban")
+    
     return question_indices, answer_indices
 
 def find_answer_from_question(question: str) -> str:
     """Mencari jawaban dari database berdasarkan pertanyaan"""
     try:
         # Normalisasi pertanyaan untuk pencarian
-        question_normalized = re.sub(r'\s+', ' ', question.lower())
+        question_normalized = re.sub(r'\s+', ' ', question.lower().strip())
         
-        # Query ke BigQuery untuk mencari jawaban
         query = f"""
-        SELECT answer, question_normalized
-        FROM `{TABLE_REF}`
+        SELECT jawaban 
+        FROM `{TABLE_REF}` 
+        WHERE LOWER(REPLACE(soal, ' ', '')) LIKE '%{question_normalized.replace(" ", "").replace("'", "''")}%'
+        LIMIT 1
         """
         
         query_job = bq_client.query(query)
-        results = query_job.result()
+        results = list(query_job.result())
         
-        best_match = None
-        best_score = 0
-        question_words = set(question_normalized.split())
-        
-        for row in results:
-            db_question_normalized = row.question_normalized
-            db_question_words = set(db_question_normalized.split())
-            
-            # Hitung kesamaan sederhana berdasarkan kata kunci
-            common_words = question_words.intersection(db_question_words)
-            similarity = len(common_words) / max(len(question_words), len(db_question_words))
-            
-            if similarity > best_score:
-                best_score = similarity
-                best_match = row.answer
-        
-        if best_match and best_score > 0.3:  # Threshold minimal kemiripan
-            logger.info(f"Ditemukan jawaban dengan skor kemiripan {best_score:.2f}: {best_match}")
-            return best_match
-        else:
-            logger.info("Tidak ditemukan jawaban yang cocok")
-            return ""
+        return results[0].jawaban if results else "Jawaban tidak ditemukan di database."
     except Exception as e:
         logger.error(f"Error mencari jawaban: {e}")
-        return ""
+        return "Terjadi error saat mencari jawaban."
 
 # =======================
 # 🤖 TELEGRAM BOT HANDLER
 # =======================
+
 # /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk command /start"""
     try:
         user = update.effective_user
         logger.info(f"User {user.username} ({user.id}) menggunakan command /start")
-       
-        await update.message.reply_text(
-            "Halo! Saya adalah Bank Soal Bot.\n\n"
-            "Perintah yang tersedia:\n"
-            "• /tambah soal=jawaban → tambah soal manual\n"
-            "• Upload CSV/Excel/Gambar → import soal otomatis\n"
-            "• Kirim pertanyaan (teks/gambar) → saya akan jawab dari bank soal\n"
-            "• /ocr → untuk melakukan OCR pada gambar yang dikirim"
+        
+        welcome_text = (
+            "Halo! Saya adalah bot pencari jawaban. Saya dapat membantu Anda:\n\n"
+            "1. Mencari jawaban dari pertanyaan teks - langsung ketik pertanyaan Anda\n"
+            "2. Mencari jawaban dari gambar - kirim gambar berisi pertanyaan\n"
+            "3. Menambah soal dan jawaban ke database - gunakan /tambah\n"
+            "4. Memproses file Excel/CSV - kirim file tersebut\n\n"
+            "Gunakan /help untuk info lebih lanjut."
         )
+        
+        await update.message.reply_text(welcome_text)
     except Exception as e:
         logger.error(f"Error di command /start: {e}")
-        await update.message.reply_text("Terjadi kesalahan internal. Silakan coba lagi nanti.")
+        await update.message.reply_text("Terjadi error. Silakan coba lagi nanti.")
+
+# /help
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler untuk command /help"""
+    try:
+        help_text = (
+            "📚 BOT PENCARI JAWABAN - BANTUAN\n\n"
+            "Perintah yang tersedia:\n"
+            "/start - Memulai bot\n"
+            "/help - Menampilkan bantuan ini\n"
+            "/tambah [soal] | [jawaban] - Menambah soal dan jawaban ke database\n"
+            "/ocr - Melakukan OCR pada gambar yang dikirim sebelumnya\n\n"
+            "Cara penggunaan:\n"
+            "1. Untuk mencari jawaban, ketik langsung pertanyaan Anda\n"
+            "2. Untuk mencari jawaban dari gambar, kirim gambar berisi pertanyaan\n"
+            "3. Untuk menambah data, gunakan /tambah atau kirim file Excel/CSV"
+        )
+        
+        await update.message.reply_text(help_text)
+    except Exception as e:
+        logger.error(f"Error di command /help: {e}")
+        await update.message.reply_text("Terjadi error. Silakan coba lagi nanti.")
 
 # /tambah
 async def tambah_soal(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -259,26 +234,32 @@ async def tambah_soal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user = update.effective_user
         logger.info(f"User {user.username} ({user.id}) menggunakan command /tambah dengan args: {context.args}")
-       
+        
         if not context.args:
-            await update.message.reply_text("Format: /tambah soal=jawaban")
+            await update.message.reply_text("Format: /tambah [soal] | [jawaban]\nContoh: /tambah Siapa presiden pertama Indonesia? | Soekarno")
             return
-       
-        text = " ".join(context.args)
-        if "=" not in text:
-            await update.message.reply_text("Format salah. Gunakan format: /tambah soal=jawaban")
+        
+        # Gabungkan semua args dan split dengan pemisah |
+        full_text = " ".join(context.args)
+        if "|" not in full_text:
+            await update.message.reply_text("Gunakan | untuk memisahkan soal dan jawaban.\nContoh: /tambah Siapa presiden pertama Indonesia? | Soekarno")
             return
-           
-        parts = text.split("=", 1)  # Split hanya pada tanda = pertama
+        
+        parts = full_text.split("|", 1)
+        if len(parts) < 2:
+            await update.message.reply_text("Format salah. Pastikan ada soal dan jawaban.\nContoh: /tambah Siapa presiden pertama Indonesia? | Soekarno")
+            return
+        
         soal, jawaban = parts[0].strip(), parts[1].strip()
-       
-        if simpan_soal(soal, jawaban, source="telegram"):
-            await update.message.reply_text(f"Soal disimpan: {soal} -> {jawaban}")
+        
+        if simpan_soal(soal, jawaban, f"telegram_{user.id}"):
+            await update.message.reply_text("Soal dan jawaban berhasil ditambahkan!")
         else:
-            await update.message.reply_text("Soal sudah ada atau tidak valid.")
+            await update.message.reply_text("Gagal menambahkan soal. Mungkin soal sudah ada di database.")
+            
     except Exception as e:
         logger.error(f"Error di command /tambah: {e}")
-        await update.message.reply_text("Terjadi kesalahan. Pastikan format: /tambah soal=jawaban")
+        await update.message.reply_text("Terjadi error. Silakan coba lagi nanti.")
 
 # Cari jawaban dari teks
 async def cari_jawaban_teks(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -287,20 +268,19 @@ async def cari_jawaban_teks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         pertanyaan = update.message.text.strip()
         logger.info(f"User {user.username} ({user.id}) mencari jawaban untuk: {pertanyaan}")
-       
-        if not pertanyaan:
-            return
-           
-        # Cari jawaban dari database
+        
+        # Tampilkan status sedang mencari
+        await update.message.reply_chat_action(action="typing")
+        
+        # Cari jawaban
         jawaban = find_answer_from_question(pertanyaan)
-       
-        if jawaban:
-            await update.message.reply_text(f"Jawaban: {jawaban}")
-        else:
-            await update.message.reply_text("Jawaban tidak ditemukan.")
+        
+        # Kirim jawaban
+        await update.message.reply_text(f"Jawaban: {jawaban}")
+        
     except Exception as e:
-        logger.error(f"Error di pencarian jawaban teks: {e}")
-        await update.message.reply_text("Terjadi kesalahan dalam pencarian.")
+        logger.error(f"Error mencari jawaban teks: {e}")
+        await update.message.reply_text("Terjadi error saat mencari jawaban. Silakan coba lagi nanti.")
 
 # Cari jawaban dari gambar
 async def cari_jawaban_gambar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -311,32 +291,30 @@ async def cari_jawaban_gambar(update: Update, context: ContextTypes.DEFAULT_TYPE
         file_id = photo.file_id
         file_size = photo.file_size
         logger.info(f"User {user.username} ({user.id}) mencari jawaban dari gambar dengan ID: {file_id} ({file_size} bytes)")
-       
-        # Download file
-        file_obj = await photo.get_file()
-        file_bytes = await file_obj.download_as_bytearray()
-        logger.info(f"Berhasil mengunduh gambar dengan ukuran {len(file_bytes)} bytes")
-       
-        # Lakukan OCR untuk mengekstrak pertanyaan
-        pertanyaan = ocr_with_google_vision(bytes(file_bytes))
-       
-        if pertanyaan:
-            # Bersihkan teks hasil OCR
-            pertanyaan = re.sub(r'\s+', ' ', pertanyaan.strip())
-            logger.info(f"Pertanyaan hasil OCR: {pertanyaan}")
-           
-            # Cari jawaban dari database
-            jawaban = find_answer_from_question(pertanyaan)
-           
-            if jawaban:
-                await update.message.reply_text(f"Jawaban: {jawaban}")
-            else:
-                await update.message.reply_text("Jawaban tidak ditemukan untuk pertanyaan tersebut.")
-        else:
-            await update.message.reply_text("Gagal mengekstrak pertanyaan dari gambar.")
+        
+        # Tampilkan status sedang memproses
+        await update.message.reply_chat_action(action="typing")
+        
+        # Download gambar
+        file = await context.bot.get_file(file_id)
+        file_bytes = await file.download_as_bytearray()
+        
+        # Lakukan OCR
+        teks_hasil_ocr = ocr_with_google_vision(bytes(file_bytes))
+        
+        if not teks_hasil_ocr:
+            await update.message.reply_text("Tidak dapat membaca teks dari gambar. Pastikan gambar jelas dan berisi teks.")
+            return
+        
+        # Cari jawaban berdasarkan teks hasil OCR
+        jawaban = find_answer_from_question(teks_hasil_ocr)
+        
+        # Kirim hasil
+        await update.message.reply_text(f"Teks terdeteksi: {teks_hasil_ocr}\n\nJawaban: {jawaban}")
+        
     except Exception as e:
-        logger.error(f"Error di pencarian jawaban gambar: {e}")
-        await update.message.reply_text("Terjadi kesalahan dalam memproses gambar.")
+        logger.error(f"Error mencari jawaban gambar: {e}")
+        await update.message.reply_text("Terjadi error saat memproses gambar. Silakan coba lagi nanti.")
 
 # Command untuk OCR
 async def ocr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -344,40 +322,31 @@ async def ocr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user = update.effective_user
         logger.info(f"User {user.username} ({user.id}) menggunakan command /ocr")
-       
-        if not update.message.reply_to_message or not update.message.reply_to_message.photo:
-            await update.message.reply_text("Silakan balas ke pesan gambar dengan command /ocr")
+        
+        # Cek apakah ada gambar yang dikirim sebelumnya
+        if not context.args or not context.args[0].startswith("file_id:"):
+            await update.message.reply_text("Kirim gambar terlebih dahulu, lalu reply dengan /ocr")
             return
-           
-        # Dapatkan file dari pesan yang dibalas
-        photo = update.message.reply_to_message.photo[-1]  # Ambil resolusi tertinggi
-        file = await photo.get_file()
-       
-        # Download file
+        
+        # Ekstrak file_id dari argumen
+        file_id = context.args[0].replace("file_id:", "")
+        
+        # Download gambar
+        file = await context.bot.get_file(file_id)
         file_bytes = await file.download_as_bytearray()
-        logger.info(f"Berhasil mengunduh gambar dengan ukuran {len(file_bytes)} bytes")
-       
+        
         # Lakukan OCR
-        extracted_text = ocr_with_google_vision(bytes(file_bytes))
-       
-        if extracted_text:
-            # Parse teks untuk mencari soal dan jawaban
-            qa_pairs = parse_qa_text(extracted_text)
-            imported = 0
-           
-            for soal, jawaban in qa_pairs:
-                if simpan_soal(soal, jawaban, source="ocr"):
-                    imported += 1
-           
-            if imported > 0:
-                await update.message.reply_text(f"OCR selesai, ditemukan dan disimpan {imported} soal.")
-            else:
-                await update.message.reply_text("OCR selesai, tetapi tidak ditemukan format soal-jawaban yang valid.")
-        else:
-            await update.message.reply_text("Gagal mengekstrak teks dari gambar.")
+        teks_hasil_ocr = ocr_with_google_vision(bytes(file_bytes))
+        
+        if not teks_hasil_ocr:
+            await update.message.reply_text("Tidak dapat membaca teks dari gambar.")
+            return
+        
+        await update.message.reply_text(f"Hasil OCR:\n\n{teks_hasil_ocr}")
+        
     except Exception as e:
         logger.error(f"Error di command /ocr: {e}")
-        await update.message.reply_text("Terjadi kesalahan dalam proses OCR.")
+        await update.message.reply_text("Terjadi error saat melakukan OCR. Silakan coba lagi nanti.")
 
 # Upload file (CSV/Excel/Gambar)
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -388,136 +357,70 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         filename = file.file_name
         file_size = file.file_size
         logger.info(f"User {user.username} ({user.id}) mengupload file: {filename} ({file_size} bytes)")
-       
-        # Download file ke memory
-        file_obj = await file.get_file()
+        
+        # Tampilkan status sedang memproses
+        await update.message.reply_chat_action(action="typing")
+        
+        # Download file
+        file_obj = await context.bot.get_file(file.file_id)
         file_bytes = await file_obj.download_as_bytearray()
-        logger.info(f"File berhasil diunduh dengan ukuran {len(file_bytes)} bytes")
-       
-        imported = 0
-       
-        if filename.endswith((".xlsx", ".xls", ".csv")):
+        
+        # Proses berdasarkan tipe file
+        if filename.endswith(('.csv', '.xlsx', '.xls')):
+            # Proses file CSV/Excel
             try:
-                # Gunakan BytesIO untuk membaca file dari memory
-                if filename.endswith((".xlsx", ".xls")):
-                    df = pd.read_excel(io.BytesIO(file_bytes))
-                else:
+                if filename.endswith('.csv'):
                     df = pd.read_csv(io.BytesIO(file_bytes))
-               
-                logger.info(f"Berhasil membaca file {filename} dengan {len(df)} baris")
-               
-                # Dapatkan header kolom
-                headers = df.columns.tolist()
-               
-                # Cari indeks kolom yang mengandung 'soal' dan 'jawaban'
-                question_indices, answer_indices = find_question_answer_columns(headers)
-               
-                if not question_indices or not answer_indices:
-                    await update.message.reply_text("Tidak ditemukan kolom dengan header 'soal' atau 'jawaban'.")
+                else:
+                    df = pd.read_excel(io.BytesIO(file_bytes))
+                
+                # Cari kolom soal dan jawaban
+                question_cols, answer_cols = find_question_answer_columns(df.columns.tolist())
+                
+                if not question_cols or not answer_cols:
+                    await update.message.reply_text("Tidak dapat menemukan kolom soal dan jawaban. Pastikan file memiliki kolom dengan nama 'soal' dan 'jawaban'.")
                     return
-               
-                # Proses setiap baris
-                for index, row in df.iterrows():
-                    # Ambil nilai dari kolom soal dan jawaban
-                    questions = [str(row.iloc[i]) for i in question_indices if i < len(row)]
-                    answers = [str(row.iloc[i]) for i in answer_indices if i < len(row)]
-                   
-                    # Simpan pasangan soal-jawaban
-                    for soal, jawaban in zip(questions, answers):
-                        if simpan_soal(soal, jawaban, source="excel"):
-                            imported += 1
-               
-                logger.info(f"Selesai memproses file, berhasil mengimport {imported} soal")
+                
+                # Simpan data ke database
+                count_success = 0
+                for _, row in df.iterrows():
+                    soal = str(row.iloc[question_cols[0]]) if question_cols else ""
+                    jawaban = str(row.iloc[answer_cols[0]]) if answer_cols else ""
+                    
+                    if soal and jawaban and simpan_soal(soal, jawaban, f"file_{filename}"):
+                        count_success += 1
+                
+                await update.message.reply_text(f"File berhasil diproses. {count_success} soal ditambahkan ke database.")
+                
             except Exception as e:
                 logger.error(f"Error memproses file: {e}")
-                await update.message.reply_text("Gagal memproses file.")
-                return
-        elif filename.lower().endswith((".jpg", ".jpeg", ".png")):
-            try:
-                logger.info(f"Berhasil membaca file gambar dengan ukuran {len(file_bytes)} bytes")
-               
-                # Lakukan OCR
-                extracted_text = ocr_with_google_vision(bytes(file_bytes))
-               
-                if extracted_text:
-                    # Parse teks untuk mencari soal dan jawaban
-                    qa_pairs = parse_qa_text(extracted_text)
-                    for soal, jawaban in qa_pairs:
-                        if simpan_soal(soal, jawaban, source="ocr"):
-                            imported += 1
-                   
-                    logger.info(f"Selesai memproses gambar, berhasil mengimport {imported} soal")
-                else:
-                    await update.message.reply_text("Gagal mengekstrak teks dari gambar.")
-                    return
-            except Exception as e:
-                logger.error(f"Error memproses gambar: {e}")
-                await update.message.reply_text("Gagal memproses file gambar.")
-                return
+                await update.message.reply_text("Gagal memproses file. Pastikan format file benar.")
+        
         else:
-            await update.message.reply_text("Format file tidak didukung. Silakan upload CSV, Excel, atau gambar.")
-            return
-           
-        await update.message.reply_text(f"Import selesai, ditambahkan {imported} soal.")
-       
+            # Proses sebagai gambar (OCR)
+            teks_hasil_ocr = ocr_with_google_vision(bytes(file_bytes))
+            
+            if not teks_hasil_ocr:
+                await update.message.reply_text("Tidak dapat membaca teks dari file. Pastikan file berisi teks yang jelas.")
+                return
+            
+            await update.message.reply_text(f"Hasil OCR:\n\n{teks_hasil_ocr}")
+            
     except Exception as e:
-        logger.error(f"Error di handler file: {e}")
-        await update.message.reply_text("Terjadi kesalahan dalam memproses file.")
-
-# Handler untuk gambar yang dikirim langsung (bukan sebagai dokumen)
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk gambar yang dikirim langsung"""
-    try:
-        user = update.effective_user
-        photo = update.message.photo[-1]  # Ambil resolusi tertinggi
-        file_id = photo.file_id
-        file_size = photo.file_size
-        logger.info(f"User {user.username} ({user.id}) mengirim gambar dengan ID: {file_id} ({file_size} bytes)")
-       
-        # Download file
-        file_obj = await photo.get_file()
-        file_bytes = await file_obj.download_as_bytearray()
-        logger.info(f"Berhasil mengunduh gambar dengan ukuran {len(file_bytes)} bytes")
-       
-        # Lakukan OCR
-        extracted_text = ocr_with_google_vision(bytes(file_bytes))
-       
-        if extracted_text:
-            # Parse teks untuk mencari soal dan jawaban
-            qa_pairs = parse_qa_text(extracted_text)
-            imported = 0
-           
-            for soal, jawaban in qa_pairs:
-                if simpan_soal(soal, jawaban, source="ocr"):
-                    imported += 1
-           
-            logger.info(f"Selesai memproses gambar langsung, berhasil mengimport {imported} soal")
-           
-            if imported > 0:
-                await update.message.reply_text(f"OCR selesai, ditemukan dan disimpan {imported} soal.")
-            else:
-                await update.message.reply_text("OCR selesai, tetapi tidak ditemukan format soal-jawaban yang valid.")
-        else:
-            await update.message.reply_text("Gagal mengekstrak teks dari gambar.")
-    except Exception as e:
-        logger.error(f"Error di handler photo: {e}")
-        await update.message.reply_text("Terjadi kesalahan dalam proses OCR.")
+        logger.error(f"Error handling file: {e}")
+        await update.message.reply_text("Terjadi error saat memproses file. Silakan coba lagi nanti.")
 
 # Handler untuk error
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk error"""
     logger.error(f"Exception while handling an update: {context.error}")
-   
-    # Kirim pesan error ke pengguna jika memungkinkan
     if update and update.message:
-        try:
-            await update.message.reply_text("Maaf, terjadi kesalahan internal. Silakan coba lagi nanti.")
-        except Exception as e:
-            logger.error(f"Error mengirim pesan error ke user: {e}")
+        await update.message.reply_text("Terjadi error. Silakan coba lagi nanti.")
 
 # =======================
 # 🚀 MAIN
 # =======================
+
 def main():
     """Fungsi utama untuk menjalankan bot"""
     try:
@@ -526,47 +429,33 @@ def main():
         if not TOKEN:
             logger.error("TELEGRAM_BOT_TOKEN tidak ditemukan di environment variables")
             return
-       
-        # URL webhook dari environment variable
-        WEBHOOK_URL = os.getenv("RAILWAY_PUBLIC_URL")
-        if not WEBHOOK_URL:
-            logger.error("RAILWAY_PUBLIC_URL tidak ditemukan di environment variables")
-            return
         
-        WEBHOOK_URL = f"{WEBHOOK_URL}/webhook"
-        PORT = int(os.getenv("PORT", "8080"))
-       
-        logger.info("Membuat aplikasi bot...")
-        app = Application.builder().token(TOKEN).build()
-       
-        # Tambahkan handler
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(CommandHandler("tambah", tambah_soal))
-        app.add_handler(CommandHandler("ocr", ocr_command))
-        app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-       
-        # Handler untuk gambar yang dikirim untuk dicari jawabannya
-        app.add_handler(MessageHandler(filters.PHOTO & filters.Regex(r'^\s*$'), cari_jawaban_gambar))
-       
-        # Handler untuk gambar yang dikirim untuk diimpor (mengandung soal dan jawaban)
-        app.add_handler(MessageHandler(filters.PHOTO & ~filters.Regex(r'^\s*$'), handle_photo))
-       
-        # Handler untuk teks pertanyaan
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cari_jawaban_teks))
-       
-        # Register error handler
-        app.add_error_handler(error_handler)
-       
-        logger.info(f"Bot berjalan dengan webhook di {WEBHOOK_URL}")
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            webhook_url=WEBHOOK_URL,
-            webhook_path="/webhook"
-        )
-       
+        # Inisialisasi services
+        initialize_services()
+        
+        # Buat application dan tambahkan handlers
+        application = Application.builder().token(TOKEN).build()
+        
+        # Command handlers
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("tambah", tambah_soal))
+        application.add_handler(CommandHandler("ocr", ocr_command))
+        
+        # Message handlers
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cari_jawaban_teks))
+        application.add_handler(MessageHandler(filters.PHOTO, cari_jawaban_gambar))
+        application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+        
+        # Error handler
+        application.add_error_handler(error_handler)
+        
+        # Jalankan bot
+        logger.info("Bot sedang berjalan...")
+        application.run_polling()
+        
     except Exception as e:
-        logger.error(f"Error menjalankan bot: {e}")
+        logger.error(f"Error in main: {e}")
 
 if __name__ == "__main__":
-    main()
+    main()        
