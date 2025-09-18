@@ -4,6 +4,7 @@ import pandas as pd
 import json
 import threading
 import time
+import asyncio
 from google.cloud import bigquery
 from google.cloud import vision
 from google.cloud.vision import ImageAnnotatorClient
@@ -540,8 +541,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =======================
 # 🚀 MAIN
 # =======================
-def run_bot():
-    """Fungsi untuk menjalankan bot"""
+async def run_bot_async():
+    """Fungsi async untuk menjalankan bot"""
     try:
         logger.info("Membuat aplikasi bot...")
         app = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -570,13 +571,13 @@ def run_bot():
             logger.info(f"Setting webhook to: {webhook_url}")
             
             # Hapus webhook yang mungkin sudah ada
-            app.bot.delete_webhook()
+            await app.bot.delete_webhook()
             
             # Set webhook baru
-            app.bot.set_webhook(url=webhook_url)
+            await app.bot.set_webhook(url=webhook_url)
             
             # Jalankan aplikasi dengan webhook
-            app.run_webhook(
+            await app.run_webhook(
                 listen="0.0.0.0",
                 port=PORT,
                 url_path=TELEGRAM_TOKEN,
@@ -585,10 +586,17 @@ def run_bot():
             )
         else:
             logger.info("RAILWAY_PUBLIC_URL tidak tersedia, menggunakan polling")
-            app.run_polling()
+            await app.run_polling()
        
     except Exception as e:
         logger.error(f"Error menjalankan bot: {e}")
+
+def run_bot():
+    """Fungsi untuk menjalankan bot dengan asyncio.run()"""
+    try:
+        asyncio.run(run_bot_async())
+    except Exception as e:
+        logger.error(f"Error di run_bot: {e}")
 
 def main():
     """Fungsi utama untuk menjalankan bot dengan threading"""
