@@ -1,6 +1,7 @@
 import os
 import re
 import pandas as pd
+import json
 from google.cloud import bigquery
 from google.cloud import vision
 from google.cloud.vision import ImageAnnotatorClient
@@ -9,6 +10,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from typing import List, Tuple
 import logging
 import datetime
+import asyncio
 
 # Setup logging dengan format yang lebih detail
 logging.basicConfig(
@@ -17,10 +19,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Konfigurasi BigQuery
-PROJECT_ID = "prime-chess-472020-b6"
-DATASET_ID = "bot_telegram_gabung"
-TABLE_ID = "banksoal"
+# Konfigurasi dari environment variables
+PROJECT_ID = os.getenv("PROJECT_ID")
+DATASET_ID = os.getenv("DATASET_ID")
+TABLE_ID = os.getenv("TABLE_ID")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+PORT = int(os.getenv("PORT", "8443"))
+RAILWAY_PUBLIC_URL = os.getenv("RAILWAY_PUBLIC_URL")
+
+# Validasi environment variables
+if not all([PROJECT_ID, DATASET_ID, TABLE_ID, TELEGRAM_TOKEN]):
+    logger.error("Satu atau lebih environment variables tidak ditemukan")
+    exit(1)
+
 TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 
 # =======================
@@ -29,9 +40,19 @@ TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 def initialize_services():
     """Inisialisasi BigQuery dan Google Vision Client"""
     try:
-        SERVICE_FILE = os.getenv("SERVICE_ACCOUNT_FILE", r"C:\Python\saefullah.json")
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = SERVICE_FILE
-       
+        # Dapatkan service account JSON dari environment variable
+        service_account_json = os.getenv("SERVICE_ACCOUNT_JSON")
+        
+        if service_account_json:
+            # Buat file temporary untuk service account
+            with open('/tmp/service_account.json', 'w') as f:
+                f.write(service_account_json)
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = '/tmp/service_account.json'
+            logger.info("Menggunakan service account dari environment variable")
+        else:
+            logger.error("SERVICE_ACCOUNT_JSON tidak ditemukan di environment variables")
+            raise ValueError("SERVICE_ACCOUNT_JSON environment variable is required")
+        
         # Inisialisasi BigQuery client
         bq_client = bigquery.Client()
        
@@ -380,8 +401,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"User {user.username} ({user.id}) mengupload file: {filename} ({file_size} bytes)")
        
         # Buat direktori temp jika belum ada
-        os.makedirs("temp", exist_ok=True)
-        local_path = f"temp/{filename}"
+        os.makedirs("/tmp", exist_ok=True)
+        local_path = f"/tmp/{filename}"
        
         # Download file
         file_obj = await file.get_file()
@@ -521,11 +542,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     """Fungsi utama untuk menjalankan bot"""
     try:
-        # Token bot yang diberikan
-        TOKEN = "7238655260:AAF2EQOI5Zh0MvPzefhNpAZQDzW-I92S3qU"
-       
         logger.info("Membuat aplikasi bot...")
-        app = Application.builder().token(TOKEN).build()
+        app = Application.builder().token(TELEGRAM_TOKEN).build()
        
         # Tambahkan handler
         app.add_handler(CommandHandler("start", start))
@@ -545,8 +563,27 @@ def main():
         # Register error handler
         app.add_error_handler(error_handler)
        
-        logger.info("Bot berjalan...")
-        app.run_polling()
+        # Setup webhook jika RAILWAY_PUBLIC_URL tersedia
+        if RAILWAY_PUBLIC_URL:
+            webhook_url = f"{RAILWAY_PUBLIC_URL}/webhook/{TELEGRAM_TOKEN}"
+            logger.info(f"Setting webhook to: {webhook_url}")
+            
+            # Hapus webhook yang mungkin sudah ada
+            asyncio.run(app.bot.delete_webhook())
+            
+            # Set webhook baru
+            asyncio.run(app.bot.set_webhook(url=webhook_url))
+            
+            # Jalankan aplikasi dengan webhook
+            app.run_webhook(
+                listen="0.0.0.0",
+                port=PORT,
+                url_path=TELEGRAM_TOKEN,
+                webhook_url=webhook_url
+            )
+        else:
+            logger.info("RAILWAY_PUBLIC_URL tidak tersedia, menggunakan polling")
+            app.run_polling()
        
     except Exception as e:
         logger.error(f"Error menjalankan bot: {e}")
