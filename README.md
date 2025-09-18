@@ -45,8 +45,3 @@ Bot Telegram untuk mencari dan menambahkan soal serta jawaban ke database BigQue
 2. Untuk mencari jawaban, ketik pertanyaan langsung
 3. Untuk mencari jawaban dari gambar, kirim gambar berisi pertanyaan
 4. Untuk menambah soal, gunakan `/tambah [soal] | [jawaban]`
-5. Untuk memproses file, kirim file CSV dengan kolom soal dan jawaban
-
-## Format File CSV
-
-File CSV harus memiliki header dengan kolom yang mengandung kata "soal" dan "jawaban", contoh:
