@@ -1,4 +1,4 @@
-..env
+.env
 *.pyc
 __pycache__/
 service-account-key.json
