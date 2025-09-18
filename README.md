@@ -1,79 +1,57 @@
 # Bank Soal Telegram Bot
 
-Bot Telegram yang dapat menyimpan dan mencari jawaban dari bank soal menggunakan BigQuery dan Google Vision API.
+Bot Telegram untuk mengelola bank soal dengan integrasi Google BigQuery dan Google Vision OCR.
 
 ## Fitur
 
 - Menambahkan soal dan jawaban secara manual
-- Mengimpor soal dari file CSV/Excel
-- Mengimpor soal dari gambar menggunakan OCR (Optical Character Recognition)
-- Mencari jawaban dari database berdasarkan pertanyaan
-- Mencari jawaban dari gambar menggunakan OCR
+- Import soal dari file CSV/Excel
+- OCR untuk mengekstrak soal dari gambar
+- Pencarian jawaban dari bank soal
+- Integrasi dengan Google BigQuery dan Google Vision API
 
-## Cara Setup
+## Deployment di Railway
 
-### Prasyarat
+1. Fork repository ini
+2. Buat project baru di Railway
+3. Connect dengan repository GitHub Anda
+4. Tambahkan environment variables yang diperlukan:
+   - `TELEGRAM_BOT_TOKEN`: Token bot Telegram
+   - `PROJECT_ID`: Google Cloud Project ID
+   - `DATASET_ID`: BigQuery Dataset ID
+   - `TABLE_ID`: BigQuery Table ID
+   - `SERVICE_ACCOUNT_JSON`: Service account JSON key untuk Google Cloud
+5. Deploy aplikasi
 
-- Python 3.9+
-- Akun Google Cloud dengan:
-  - BigQuery API diaktifkan
-  - Vision API diaktifkan
-  - Service Account JSON file
-- Token Bot Telegram
+## Environment Variables
 
-### Environment Variables
+| Variable | Description |
+|----------|-------------|
+| `TELEGRAM_BOT_TOKEN` | Token bot Telegram dari @BotFather |
+| `PROJECT_ID` | Google Cloud Project ID |
+| `DATASET_ID` | BigQuery Dataset ID |
+| `TABLE_ID` | BigQuery Table ID |
+| `SERVICE_ACCOUNT_JSON` | Service account JSON key untuk Google Cloud |
+| `RAILWAY_PUBLIC_URL` | URL public Railway (otomatis) |
+| `PORT` | Port untuk webhook (default: 8443) |
 
-Berikut adalah environment variables yang diperlukan:
+## Command Bot
 
-| Variable | Deskripsi | Contoh |
-|----------|-----------|--------|
-| `TELEGRAM_BOT_TOKEN` | Token bot Telegram | `7238655260:AAF2EQOI5Zh0MvPzefhNpAZQDzW-I92S3qU` |
-| `PROJECT_ID` | ID project Google Cloud | `prime-chess-472020-b6` |
-| `DATASET_ID` | ID dataset BigQuery | `bot_telegram_gabung` |
-| `TABLE_ID` | ID tabel BigQuery | `banksoal` |
-| `SERVICE_ACCOUNT_JSON` | Service account JSON dalam format string | `{"type": "service_account", "project_id": "...", ...}` |
-| `RAILWAY_PUBLIC_URL` | URL publik Railway (otomatis dibuat) | `https://your-app.railway.app` |
-| `PORT` | Port untuk aplikasi (otomatis dibuat) | `8443` |
+- `/start` - Memulai bot dan menampilkan panduan
+- `/tambah soal=jawaban` - Menambah soal manual
+- `/ocr` - Melakukan OCR pada gambar yang dibalas
+- Upload file CSV/Excel - Import soal otomatis
+- Kirim pertanyaan teks - Mencari jawaban dari bank soal
+- Kirim gambar soal - Mencari jawaban dengan OCR
 
-### Deploy ke Railway
+## Struktur Database
 
-1. Fork atau clone repository ini
-2. Push kode ke GitHub repository
-3. Hubungkan repository ke Railway:
-   - Login ke Railway
-   - Klik "New Project"
-   - Pilih "Deploy from GitHub repo"
-   - Pilih repository ini
-4. Setup environment variables di Railway:
-   - Buka tab "Variables"
-   - Tambahkan semua environment variables yang diperlukan
-   - Untuk `SERVICE_ACCOUNT_JSON`, paste seluruh isi file JSON service account Anda
-5. Deploy aplikasi dengan klik "Deploy"
+Tabel BigQuery harus memiliki schema berikut:
 
-### Cara Penggunaan
-
-#### Commands
-
-- `/start` - Menampilkan pesan selamat datang dan daftar perintah
-- `/tambah soal=jawaban` - Menambahkan soal dan jawaban secara manual
-- `/ocr` - Melakukan OCR pada gambar yang dibalas (reply)
-
-#### Fitur Lainnya
-
-- **Upload file CSV/Excel** - Bot akan otomatis mendeteksi kolom soal dan jawaban
-- **Upload gambar** - Bot akan melakukan OCR dan menyimpan soal-jawaban yang ditemukan
-- **Kirim pertanyaan (teks)** - Bot akan mencari jawaban dari database
-- **Kirim gambar dengan pertanyaan** - Bot akan melakukan OCR dan mencari jawaban dari database
-
-## Struktur Database BigQuery
-
-Bot menggunakan tabel BigQuery dengan struktur berikut:
-
-```sql
-CREATE TABLE `prime-chess-472020-b6.bot_telegram_gabung.banksoal` (
-  question STRING,
-  question_normalized STRING,
-  answer STRING,
-  source STRING,
-  created_at STRING
-);
+| Field | Type | Mode |
+|-------|------|------|
+| question | STRING | REQUIRED |
+| question_normalized | STRING | REQUIRED |
+| answer | STRING | REQUIRED |
+| source | STRING | NULLABLE |
+| created_at | TIMESTAMP | REQUIRED |
