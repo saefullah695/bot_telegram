@@ -185,9 +185,22 @@ def find_question_answer_columns(headers: List[str]) -> Tuple[List[int], List[in
 def find_answer_from_question(question: str) -> str:
     """Mencari jawaban dari database berdasarkan pertanyaan"""
     try:
+        # Periksa koneksi database
+        if bq_client is None:
+            logger.error("BigQuery client tidak tersedia")
+            return "Maaf, database sedang tidak tersedia. Silakan coba lagi nanti."
+        
         # Normalisasi pertanyaan untuk pencarian
         question_normal = normalize_question(question)
         
+        # Validasi panjang pertanyaan
+        if len(question_normal) < 2:
+            logger.warning(f"Pertanyaan terlalu pendek: '{question}' -> '{question_normal}'")
+            return "Pertanyaan terlalu pendek. Silakan berikan pertanyaan yang lebih lengkap."
+        
+        logger.info(f"Mencari jawaban untuk: '{question}' (normalized: '{question_normal}')")
+        
+        # Query untuk exact match
         query = """
         SELECT answer 
         FROM `{0}` 
@@ -205,9 +218,11 @@ def find_answer_from_question(question: str) -> str:
         results = list(query_job.result())
         
         if results:
+            logger.info("Ditemukan exact match")
             return results[0].answer
         
         # Jika tidak ditemukan exact match, cari dengan LIKE
+        logger.info("Tidak ditemukan exact match, mencoba dengan LIKE")
         query_like = """
         SELECT answer 
         FROM `{0}` 
@@ -225,10 +240,15 @@ def find_answer_from_question(question: str) -> str:
         query_job_like = bq_client.query(query_like, job_config=job_config_like)
         results_like = list(query_job_like.result())
         
-        return results_like[0].answer if results_like else "Jawaban tidak ditemukan di database."
+        if results_like:
+            logger.info("Ditemukan partial match")
+            return results_like[0].answer
+        
+        logger.info("Tidak ditemukan jawaban di database")
+        return "Jawaban tidak ditemukan di database. Coba gunakan kata kunci yang lebih spesifik."
             
     except Exception as e:
-        logger.error(f"Error mencari jawaban: {str(e)}")
+        logger.error(f"Error mencari jawaban: {str(e)}", exc_info=True)
         logger.error(f"Pertanyaan yang dicari: {question}")
         return "Maaf, terjadi kesalahan saat mencari jawaban. Silakan coba lagi nanti."
 
@@ -351,7 +371,12 @@ async def cari_jawaban_teks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user = update.effective_user
         question = update.message.text.strip()
-        logger.info(f"User {user.username} ({user.id}) mencari jawaban untuk: {question}")
+        logger.info(f"User {user.username} ({user.id}) mencari jawaban untuk: '{question}'")
+        
+        # Validasi panjang pertanyaan
+        if len(question) < 2:
+            await update.message.reply_text("Pertanyaan terlalu pendek. Silakan berikan pertanyaan yang lebih lengkap.")
+            return
         
         # Periksa koneksi database sebelum melanjutkan
         if bq_client is None:
@@ -368,7 +393,7 @@ async def cari_jawaban_teks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Pertanyaan: {question}\n\nJawaban: {answer}")
         
     except Exception as e:
-        logger.error(f"Error mencari jawaban teks: {e}")
+        logger.error(f"Error mencari jawaban teks: {e}", exc_info=True)
         await update.message.reply_text("Maaf, terjadi kesalahan saat mencari jawaban. Silakan coba lagi nanti.")
 
 # Cari jawaban dari gambar
@@ -395,6 +420,11 @@ async def cari_jawaban_gambar(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("Tidak dapat membaca teks dari gambar. Pastikan gambar jelas dan berisi teks.")
             return
         
+        # Validasi panjang teks hasil OCR
+        if len(ocr_text.strip()) < 2:
+            await update.message.reply_text("Teks yang terdeteksi terlalu pendek. Pastikan gambar berisi pertanyaan yang jelas.")
+            return
+        
         # Cari jawaban berdasarkan teks hasil OCR
         answer = find_answer_from_question(ocr_text)
         
@@ -402,7 +432,7 @@ async def cari_jawaban_gambar(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"Teks terdeteksi: {ocr_text}\n\nJawaban: {answer}")
         
     except Exception as e:
-        logger.error(f"Error mencari jawaban gambar: {e}")
+        logger.error(f"Error mencari jawaban gambar: {e}", exc_info=True)
         await update.message.reply_text("Terjadi error saat memproses gambar. Silakan coba lagi nanti.")
 
 # Command untuk OCR
@@ -434,7 +464,7 @@ async def ocr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Hasil OCR:\n\n{ocr_text}")
         
     except Exception as e:
-        logger.error(f"Error di command /ocr: {e}")
+        logger.error(f"Error di command /ocr: {e}", exc_info=True)
         await update.message.reply_text("Terjadi error saat melakukan OCR. Silakan coba lagi nanti.")
 
 # Upload file (CSV)
@@ -468,13 +498,13 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Gagal memproses file. Pastikan format file benar dan memiliki kolom 'question' dan 'answer'.")
             
     except Exception as e:
-        logger.error(f"Error handling file: {e}")
+        logger.error(f"Error handling file: {e}", exc_info=True)
         await update.message.reply_text("Terjadi error saat memproses file. Silakan coba lagi nanti.")
 
 # Handler untuk error
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk error"""
-    logger.error(f"Exception while handling an update: {context.error}")
+    logger.error(f"Exception while handling an update: {context.error}", exc_info=True)
     if update and update.message:
         await update.message.reply_text("Terjadi error. Silakan coba lagi nanti.")
 
@@ -516,7 +546,7 @@ def main():
         application.run_polling()
         
     except Exception as e:
-        logger.error(f"Error in main: {e}")
+        logger.error(f"Error in main: {e}", exc_info=True)
 
 if __name__ == "__main__":
     main()
