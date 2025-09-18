@@ -1,0 +1,5 @@
+[build]
+  command = "echo 'Build step not required'"
+
+[deploy]
+  startCommand = "python bot_telegram.py"
