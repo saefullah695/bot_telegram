@@ -3,3 +3,5 @@ google-cloud-vision
 python-telegram-bot
 pandas
 python-dotenv
+gunicorn
+eventlet
