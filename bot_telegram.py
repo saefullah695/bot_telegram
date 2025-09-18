@@ -584,7 +584,7 @@ def main():
         else:
             logger.info("RAILWAY_PUBLIC_URL tidak tersedia, menggunakan polling")
             app.run_polling()
-       
+        
     except Exception as e:
         logger.error(f"Error menjalankan bot: {e}")
 
