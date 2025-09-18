@@ -1,11 +1,7 @@
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
 .env
-*.log
-/tmp/
-/service_account.json
+*.pyc
+__pycache__/
+service-account-key.json
 .DS_Store
 .vscode/
 .venv/
