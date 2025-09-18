@@ -25,12 +25,16 @@ DATASET_ID = os.getenv("DATASET_ID")
 TABLE_ID = os.getenv("TABLE_ID")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 PORT = int(os.getenv("PORT", "8443"))
-RAILWAY_PUBLIC_URL = os.getenv("RAILWAY_PUBLIC_URL")
+RAILWAY_PUBLIC_URL = os.getenv("RAILWAY_PUBLIC_URL", "https://bottelegram-production-b4c8.up.railway.app")
 
 # Validasi environment variables
 if not all([PROJECT_ID, DATASET_ID, TABLE_ID, TELEGRAM_TOKEN]):
     logger.error("Satu atau lebih environment variables tidak ditemukan")
     exit(1)
+
+# Bersihkan RAILWAY_PUBLIC_URL dari trailing slash
+if RAILWAY_PUBLIC_URL:
+    RAILWAY_PUBLIC_URL = RAILWAY_PUBLIC_URL.rstrip('/')
 
 TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 
@@ -565,6 +569,7 @@ async def main():
        
         # Setup webhook jika RAILWAY_PUBLIC_URL tersedia
         if RAILWAY_PUBLIC_URL:
+            # Format webhook URL dengan benar
             webhook_url = f"{RAILWAY_PUBLIC_URL}/webhook/{TELEGRAM_TOKEN}"
             logger.info(f"Setting webhook to: {webhook_url}")
             
