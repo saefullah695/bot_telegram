@@ -7,7 +7,13 @@ Bot Telegram untuk mencari dan menambahkan soal serta jawaban ke database BigQue
 - Mencari jawaban dari pertanyaan teks
 - Mencari jawaban dari gambar (OCR)
 - Menambah soal dan jawaban ke database
-- Memproses file CSV/Excel untuk menambah data dalam jumlah banyak
+- Memproses file CSV untuk menambah data dalam jumlah banyak
+
+## Perubahan Utama
+
+1. **Menghapus dependensi pandas** untuk menghindari crash dan mengurangi ukuran deployment
+2. **Menggunakan modul csv bawaan** Python untuk memproses file CSV
+3. **Membatasi hanya file CSV** yang diterima (tidak lagi mendukung Excel)
 
 ## Cara Menjalankan di Railway
 
@@ -39,15 +45,8 @@ Bot Telegram untuk mencari dan menambahkan soal serta jawaban ke database BigQue
 2. Untuk mencari jawaban, ketik pertanyaan langsung
 3. Untuk mencari jawaban dari gambar, kirim gambar berisi pertanyaan
 4. Untuk menambah soal, gunakan `/tambah [soal] | [jawaban]`
-5. Untuk memproses file, kirim file CSV/Excel dengan kolom soal dan jawaban
+5. Untuk memproses file, kirim file CSV dengan kolom soal dan jawaban
 
-## Struktur Database
+## Format File CSV
 
-Tabel BigQuery harus memiliki skema berikut:
-
-| Kolom | Tipe | Deskripsi |
-|-------|------|-----------|
-| soal | STRING | Pertanyaan |
-| jawaban | STRING | Jawaban |
-| source | STRING | Sumber data |
-| created_at | TIMESTAMP | Waktu dibuat |
+File CSV harus memiliki header dengan kolom yang mengandung kata "soal" dan "jawaban", contoh:
