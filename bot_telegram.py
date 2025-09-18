@@ -83,18 +83,18 @@ def simpan_soal(question: str, answer: str, source: str = "manual") -> bool:
             return False
 
         # Normalisasi pertanyaan
-        question_normalized = normalize_question(question)
+        question_normal = normalize_question(question)
 
-        # Cek duplikat berdasarkan question_normalized
+        # Cek duplikat berdasarkan question_normal
         query = f"""
         SELECT COUNT(*) as count 
         FROM `{TABLE_REF}` 
-        WHERE question_normalized = @question_normalized
+        WHERE question_normal = @question_normal
         """
         
         job_config = bigquery.QueryJobConfig(
             query_parameters=[
-                bigquery.ScalarQueryParameter("question_normalized", "STRING", question_normalized)
+                bigquery.ScalarQueryParameter("question_normal", "STRING", question_normal)
             ]
         )
         
@@ -109,9 +109,9 @@ def simpan_soal(question: str, answer: str, source: str = "manual") -> bool:
         rows_to_insert = [{
             "id": str(uuid.uuid4()),
             "question": question,
-            "question_normalized": question_normalized,
+            "question_normal": question_normal,
             "answer": answer,
-            "source": source,
+            "Source": source,
             "timestamp": datetime.datetime.utcnow().isoformat() + "Z"
         }]
 
@@ -186,18 +186,18 @@ def find_answer_from_question(question: str) -> str:
     """Mencari jawaban dari database berdasarkan pertanyaan"""
     try:
         # Normalisasi pertanyaan untuk pencarian
-        question_normalized = normalize_question(question)
+        question_normal = normalize_question(question)
         
         query = """
         SELECT answer 
         FROM `{0}` 
-        WHERE question_normalized = @question_normalized
+        WHERE question_normal = @question_normal
         LIMIT 1
         """.format(TABLE_REF)
         
         job_config = bigquery.QueryJobConfig(
             query_parameters=[
-                bigquery.ScalarQueryParameter("question_normalized", "STRING", question_normalized)
+                bigquery.ScalarQueryParameter("question_normal", "STRING", question_normal)
             ]
         )
         
@@ -211,13 +211,14 @@ def find_answer_from_question(question: str) -> str:
         query_like = """
         SELECT answer 
         FROM `{0}` 
-        WHERE question_normalized LIKE @question_like
+        WHERE question_normal LIKE @question_like
+        ORDER BY LENGTH(question_normal) ASC
         LIMIT 1
         """.format(TABLE_REF)
         
         job_config_like = bigquery.QueryJobConfig(
             query_parameters=[
-                bigquery.ScalarQueryParameter("question_like", "STRING", f"%{question_normalized}%")
+                bigquery.ScalarQueryParameter("question_like", "STRING", f"%{question_normal}%")
             ]
         )
         
