@@ -1,59 +1,55 @@
-# Bot Telegram Pencari Jawaban
+# Telegram Bot dengan BigQuery dan Google Vision
 
-Bot Telegram untuk mencari dan menambahkan soal serta jawaban ke database BigQuery.
+Bot Telegram yang dapat:
+1. Menyimpan dan mencari jawaban dari database BigQuery
+2. Melakukan OCR pada gambar untuk mengekstrak teks
+3. Memproses file CSV untuk menambah data soal dan jawaban
 
 ## Fitur
-
 - Mencari jawaban dari pertanyaan teks
-- Mencari jawaban dari gambar (OCR)
+- Mencari jawaban dari gambar (dengan OCR)
 - Menambah soal dan jawaban ke database
-- Memproses file CSV untuk menambah data dalam jumlah banyak
-
-## Struktur Database
-
-Tabel BigQuery memiliki struktur berikut:
-
-| Kolom | Tipe | Deskripsi |
-|-------|------|-----------|
-| id | STRING | ID unik (UUID) |
-| question | STRING | Pertanyaan asli |
-| question_normalized | STRING | Pertanyaan yang dinormalisasi |
-| answer | STRING | Jawaban |
-| source | STRING | Sumber data |
-| timestamp | TIMESTAMP | Waktu dibuat |
+- Memproses file CSV untuk menambah data
 
 ## Cara Menjalankan di Railway
 
-1. Fork repository ini ke GitHub account Anda
-2. Buat akun Railway jika belum punya
-3. Hubungkan Railway dengan repository GitHub Anda
-4. Tambahkan environment variables di Railway:
-   - `TELEGRAM_BOT_TOKEN`: Token bot Telegram dari @BotFather
-   - `SERVICE_ACCOUNT_JSON`: JSON credentials Google Cloud Service Account
-   - `PROJECT_ID`: Google Cloud Project ID
-   - `DATASET_ID`: BigQuery Dataset ID
-   - `TABLE_ID`: BigQuery Table ID
+1. Fork atau clone repositori ini
+2. Buat proyek baru di Railway
+3. Hubungkan repositori GitHub ke Railway
+4. Set environment variables berikut:
+   - `TELEGRAM_BOT_TOKEN`: Token bot Telegram
+   - `PROJECT_ID`: ID project Google Cloud
+   - `DATASET_ID`: ID dataset BigQuery
+   - `TABLE_ID`: ID tabel BigQuery
+   - `SERVICE_ACCOUNT_JSON`: JSON string dari service account Google Cloud (dalam format JSON, bukan base64)
 
-5. Deploy otomatis akan dilakukan oleh Railway
+5. Deploy
 
 ## Environment Variables
 
-| Variable | Deskripsi | Contoh |
-|----------|-----------|--------|
-| TELEGRAM_BOT_TOKEN | Token bot Telegram | 123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11 |
-| SERVICE_ACCOUNT_JSON | JSON service account Google Cloud | {"type": "service_account", ...} |
-| PROJECT_ID | Google Cloud Project ID | my-project-id |
-| DATASET_ID | BigQuery Dataset ID | my_dataset |
-| TABLE_ID | BigQuery Table ID | banksoal |
+| Variable | Deskripsi |
+|----------|-----------|
+| `TELEGRAM_BOT_TOKEN` | Token bot Telegram dari @BotFather |
+| `PROJECT_ID` | ID project Google Cloud |
+| `DATASET_ID` | ID dataset di BigQuery |
+| `TABLE_ID` | ID tabel di BigQuery |
+| `SERVICE_ACCOUNT_JSON` | JSON string dari service account |
 
-## Cara Penggunaan
+## Struktur Tabel BigQuery
 
-1. Mulai bot dengan perintah `/start`
-2. Untuk mencari jawaban, ketik pertanyaan langsung
-3. Untuk mencari jawaban dari gambar, kirim gambar berisi pertanyaan
-4. Untuk menambah soal, gunakan `/tambah [soal] | [jawaban]`
-5. Untuk memproses file, kirim file CSV dengan kolom question dan answer
+Tabel di BigQuery harus memiliki struktur sebagai berikut:
+- `id`: STRING (nullable) - ID unik otomatis
+- `question`: STRING (nullable) - Pertanyaan asli
+- `question_normal`: STRING (nullable) - Pertanyaan yang dinormalisasi
+- `answer`: STRING (nullable) - Jawaban
+- `Source`: STRING (nullable) - Sumber data (otomatis)
+- `timestamp`: STRING (nullable) - Timestamp (otomatis)
 
-## Format File CSV
+## Cara Penggunaan Bot
 
-File CSV harus memiliki header dengan kolom yang mengandung kata "question" dan "answer", contoh:
+1. **Mencari jawaban**: Ketik pertanyaan langsung ke bot
+2. **Mencari jawaban dari gambar**: Kirim gambar yang berisi pertanyaan
+3. **Menambah soal**: Gunakan perintah `/tambah [soal] | [jawaban]`
+4. **Upload CSV**: Kirim file CSV dengan kolom `question` dan `answer`
+
+## Contoh Perintah
