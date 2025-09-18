@@ -95,18 +95,18 @@ def simpan_soal(question: str, answer: str, source: str = "manual") -> bool:
             return False
 
         # Normalisasi pertanyaan
-        question_normal = normalize_question(question)
+        question_normalized = normalize_question(question)
 
-        # Cek duplikat berdasarkan question_normal
+        # Cek duplikat berdasarkan question_normalized
         query = f"""
         SELECT COUNT(*) as count 
         FROM `{TABLE_REF}` 
-        WHERE question_normal = @question_normal
+        WHERE question_normalized = @question_normalized
         """
         
         job_config = bigquery.QueryJobConfig(
             query_parameters=[
-                bigquery.ScalarQueryParameter("question_normal", "STRING", question_normal)
+                bigquery.ScalarQueryParameter("question_normalized", "STRING", question_normalized)
             ]
         )
         
@@ -121,9 +121,9 @@ def simpan_soal(question: str, answer: str, source: str = "manual") -> bool:
         rows_to_insert = [{
             "id": str(uuid.uuid4()),
             "question": question,
-            "question_normal": question_normal,
+            "question_normalized": question_normalized,
             "answer": answer,
-            "Source": source,
+            "source": source,
             "timestamp": datetime.datetime.utcnow().isoformat() + "Z"
         }]
 
@@ -214,7 +214,7 @@ def find_answer_from_question(question: str) -> str:
         
         # Query ke BigQuery untuk mendapatkan semua pertanyaan dan jawaban
         query = f"""
-        SELECT answer, question_normal
+        SELECT answer, question_normalized
         FROM `{TABLE_REF}`
         """
         
@@ -226,7 +226,7 @@ def find_answer_from_question(question: str) -> str:
         question_words = set(question_normalized.split())
         
         for row in results:
-            db_question_normalized = row.question_normal
+            db_question_normalized = row.question_normalized
             db_question_words = set(db_question_normalized.split())
             
             # Hitung kesamaan sederhana berdasarkan kata kunci
