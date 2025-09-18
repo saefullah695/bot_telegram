@@ -195,7 +195,7 @@ def find_question_answer_columns(headers: List[str]) -> Tuple[List[int], List[in
     return question_indices, answer_indices
 
 def find_answer_from_question(question: str) -> str:
-    """Mencari jawaban dari database berdasarkan pertanyaan"""
+    """Mencari jawaban dari database berdasarkan pertanyaan dengan pendekatan kemiripan kata"""
     try:
         # Periksa koneksi database
         if bq_client is None:
@@ -203,69 +203,46 @@ def find_answer_from_question(question: str) -> str:
             return "Maaf, database sedang tidak tersedia. Silakan coba lagi nanti."
         
         # Normalisasi pertanyaan untuk pencarian
-        question_normal = normalize_question(question)
+        question_normalized = normalize_question(question)
         
         # Validasi panjang pertanyaan
-        if len(question_normal) < 2:
-            logger.warning(f"Pertanyaan terlalu pendek: '{question}' -> '{question_normal}'")
+        if len(question_normalized) < 2:
+            logger.warning(f"Pertanyaan terlalu pendek: '{question}' -> '{question_normalized}'")
             return "Pertanyaan terlalu pendek. Silakan berikan pertanyaan yang lebih lengkap."
         
-        logger.info(f"Mencari jawaban untuk: '{question}' (normalized: '{question_normal}')")
+        logger.info(f"Mencari jawaban untuk: '{question}' (normalized: '{question_normalized}')")
         
-        # Query untuk exact match
-        try:
-            query = """
-            SELECT answer 
-            FROM `{0}` 
-            WHERE question_normal = @question_normal
-            LIMIT 1
-            """.format(TABLE_REF)
-            
-            job_config = bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ScalarQueryParameter("question_normal", "STRING", question_normal)
-                ]
-            )
-            
-            logger.info(f"Menjalankan query exact match: {query}")
-            query_job = bq_client.query(query, job_config=job_config)
-            results = list(query_job.result())
-            
-            if results:
-                logger.info("Ditemukan exact match")
-                return results[0].answer
-        except Exception as e:
-            logger.error(f"Error pada query exact match: {e}", exc_info=True)
+        # Query ke BigQuery untuk mendapatkan semua pertanyaan dan jawaban
+        query = f"""
+        SELECT answer, question_normal
+        FROM `{TABLE_REF}`
+        """
         
-        # Jika tidak ditemukan exact match, cari dengan LIKE
-        try:
-            logger.info("Tidak ditemukan exact match, mencoba dengan LIKE")
-            query_like = """
-            SELECT answer 
-            FROM `{0}` 
-            WHERE question_normal LIKE @question_like
-            ORDER BY LENGTH(question_normal) ASC
-            LIMIT 1
-            """.format(TABLE_REF)
-            
-            job_config_like = bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ScalarQueryParameter("question_like", "STRING", f"%{question_normal}%")
-                ]
-            )
-            
-            logger.info(f"Menjalankan query LIKE: {query_like}")
-            query_job_like = bq_client.query(query_like, job_config=job_config_like)
-            results_like = list(query_job_like.result())
-            
-            if results_like:
-                logger.info("Ditemukan partial match")
-                return results_like[0].answer
-        except Exception as e:
-            logger.error(f"Error pada query LIKE: {e}", exc_info=True)
+        query_job = bq_client.query(query)
+        results = query_job.result()
         
-        logger.info("Tidak ditemukan jawaban di database")
-        return "Jawaban tidak ditemukan di database. Coba gunakan kata kunci yang lebih spesifik."
+        best_match = None
+        best_score = 0
+        question_words = set(question_normalized.split())
+        
+        for row in results:
+            db_question_normalized = row.question_normal
+            db_question_words = set(db_question_normalized.split())
+            
+            # Hitung kesamaan sederhana berdasarkan kata kunci
+            common_words = question_words.intersection(db_question_words)
+            similarity = len(common_words) / max(len(question_words), len(db_question_words), 1)  # Hindari pembagian dengan nol
+            
+            if similarity > best_score:
+                best_score = similarity
+                best_match = row.answer
+        
+        if best_match and best_score > 0.3:  # Threshold minimal kemiripan
+            logger.info(f"Ditemukan jawaban dengan skor kemiripan {best_score:.2f}: {best_match}")
+            return best_match
+        else:
+            logger.info("Tidak ditemukan jawaban yang cocok")
+            return "Jawaban tidak ditemukan di database. Coba gunakan kata kunci yang lebih spesifik."
             
     except Exception as e:
         logger.error(f"Error mencari jawaban: {str(e)}", exc_info=True)
