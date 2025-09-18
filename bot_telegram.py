@@ -29,7 +29,7 @@ PORT = int(os.getenv("PORT", "8443"))
 RAILWAY_PUBLIC_URL = os.getenv("RAILWAY_PUBLIC_URL", "bottelegram-production-b4c8.up.railway.app")
 
 # Pastikan URL diawali dengan https://
-if not RAILWAY_PUBLIC_URL.startswith('http'):
+if RAILWAY_PUBLIC_URL and not RAILWAY_PUBLIC_URL.startswith('http'):
     RAILWAY_PUBLIC_URL = f"https://{RAILWAY_PUBLIC_URL}"
 
 # Validasi environment variables
@@ -178,7 +178,7 @@ def ocr_with_google_vision(image_content: bytes) -> str:
                     extracted_text += "\n"
        
         if response.error.message:
-            logger.error(f"Google Vision API error: {response.error.message}")
+            logger.error(f"Google Vision API error: {response.error.message")
             return ""
            
         logger.info(f"Berhasil mengekstrak teks dari gambar dengan panjang {len(extracted_text)} karakter")
@@ -565,7 +565,7 @@ async def main():
         app.add_handler(MessageHandler(filters.PHOTO & filters.Regex(r'^\s*$'), cari_jawaban_gambar))
        
         # Handler untuk gambar yang dikirim untuk diimpor (mengandung soal dan jawaban)
-        app.add_handler(MessageHandler(filters.PHOTO & ~filters.Regex(r'^\s*$'), handle_photo))
+        app.add_handler(MessageHandler(filters.PHORY & ~filters.Regex(r'^\s*$'), handle_photo))
        
         # Handler untuk teks pertanyaan
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cari_jawaban_teks))
@@ -575,9 +575,9 @@ async def main():
        
         # Setup webhook jika RAILWAY_PUBLIC_URL tersedia
         if RAILWAY_PUBLIC_URL:
-            # Pastikan URL tidak memiliki trailing slash
-            RAILWAY_PUBLIC_URL = RAILWAY_PUBLIC_URL.rstrip('/')
-            webhook_url = f"{RAILWAY_PUBLIC_URL}/webhook/{TELEGRAM_TOKEN}"
+            # Buat salinan lokal dari variabel global
+            railway_url = RAILWAY_PUBLIC_URL.rstrip('/')
+            webhook_url = f"{railway_url}/webhook/{TELEGRAM_TOKEN}"
             logger.info(f"Setting webhook to: {webhook_url}")
             
             # Hapus webhook yang mungkin sudah ada
