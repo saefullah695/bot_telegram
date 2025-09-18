@@ -2,9 +2,6 @@ import os
 import re
 import pandas as pd
 import json
-import threading
-import time
-import asyncio
 from google.cloud import bigquery
 from google.cloud import vision
 from google.cloud.vision import ImageAnnotatorClient
@@ -541,8 +538,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =======================
 # 🚀 MAIN
 # =======================
-async def run_bot_async():
-    """Fungsi async untuk menjalankan bot"""
+def main():
+    """Fungsi utama untuk menjalankan bot"""
     try:
         logger.info("Membuat aplikasi bot...")
         app = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -571,13 +568,13 @@ async def run_bot_async():
             logger.info(f"Setting webhook to: {webhook_url}")
             
             # Hapus webhook yang mungkin sudah ada
-            await app.bot.delete_webhook()
+            app.bot.delete_webhook()
             
             # Set webhook baru
-            await app.bot.set_webhook(url=webhook_url)
+            app.bot.set_webhook(url=webhook_url)
             
             # Jalankan aplikasi dengan webhook
-            await app.run_webhook(
+            app.run_webhook(
                 listen="0.0.0.0",
                 port=PORT,
                 url_path=TELEGRAM_TOKEN,
@@ -586,33 +583,10 @@ async def run_bot_async():
             )
         else:
             logger.info("RAILWAY_PUBLIC_URL tidak tersedia, menggunakan polling")
-            await app.run_polling()
+            app.run_polling()
        
     except Exception as e:
         logger.error(f"Error menjalankan bot: {e}")
-
-def run_bot():
-    """Fungsi untuk menjalankan bot dengan asyncio.run()"""
-    try:
-        asyncio.run(run_bot_async())
-    except Exception as e:
-        logger.error(f"Error di run_bot: {e}")
-
-def main():
-    """Fungsi utama untuk menjalankan bot dengan threading"""
-    try:
-        # Jalankan bot di thread terpisah untuk menghindari masalah event loop
-        bot_thread = threading.Thread(target=run_bot)
-        bot_thread.daemon = True
-        bot_thread.start()
-        
-        # Keep main thread alive
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("Bot dihentikan oleh pengguna")
-    except Exception as e:
-        logger.error(f"Error di main: {e}")
 
 if __name__ == "__main__":
     main()
