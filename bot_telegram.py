@@ -54,6 +54,16 @@ def initialize_services():
         bq_client = bigquery.Client(project=PROJECT_ID)
         vision_client = vision.ImageAnnotatorClient()
         logger.info("BigQuery dan Vision clients berhasil diinisialisasi")
+        
+        # Test koneksi BigQuery
+        try:
+            test_query = f"SELECT COUNT(*) as count FROM `{TABLE_REF}`"
+            query_job = bq_client.query(test_query)
+            results = list(query_job.result())
+            logger.info(f"Test koneksi BigQuery berhasil. Jumlah data: {results[0].count}")
+        except Exception as e:
+            logger.error(f"Test koneksi BigQuery gagal: {e}")
+            
         return bq_client, vision_client
     except Exception as e:
         logger.error(f"Gagal menginisialisasi services: {e}")
@@ -65,7 +75,9 @@ def normalize_question(question: str) -> str:
         # Hapus karakter khusus, ubah ke lowercase, dan hapus spasi berlebih
         normalized = re.sub(r'[^\w\s]', '', question.lower())  # Hapus karakter khusus
         normalized = re.sub(r'\s+', ' ', normalized)  # Hapus spasi berlebih
-        return normalized.strip()
+        result = normalized.strip()
+        logger.info(f"Normalisasi pertanyaan: '{question}' -> '{result}'")
+        return result
     except Exception as e:
         logger.error(f"Error normalisasi pertanyaan: {e}")
         return question.lower().strip()
@@ -201,48 +213,56 @@ def find_answer_from_question(question: str) -> str:
         logger.info(f"Mencari jawaban untuk: '{question}' (normalized: '{question_normal}')")
         
         # Query untuk exact match
-        query = """
-        SELECT answer 
-        FROM `{0}` 
-        WHERE question_normal = @question_normal
-        LIMIT 1
-        """.format(TABLE_REF)
-        
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("question_normal", "STRING", question_normal)
-            ]
-        )
-        
-        query_job = bq_client.query(query, job_config=job_config)
-        results = list(query_job.result())
-        
-        if results:
-            logger.info("Ditemukan exact match")
-            return results[0].answer
+        try:
+            query = """
+            SELECT answer 
+            FROM `{0}` 
+            WHERE question_normal = @question_normal
+            LIMIT 1
+            """.format(TABLE_REF)
+            
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("question_normal", "STRING", question_normal)
+                ]
+            )
+            
+            logger.info(f"Menjalankan query exact match: {query}")
+            query_job = bq_client.query(query, job_config=job_config)
+            results = list(query_job.result())
+            
+            if results:
+                logger.info("Ditemukan exact match")
+                return results[0].answer
+        except Exception as e:
+            logger.error(f"Error pada query exact match: {e}", exc_info=True)
         
         # Jika tidak ditemukan exact match, cari dengan LIKE
-        logger.info("Tidak ditemukan exact match, mencoba dengan LIKE")
-        query_like = """
-        SELECT answer 
-        FROM `{0}` 
-        WHERE question_normal LIKE @question_like
-        ORDER BY LENGTH(question_normal) ASC
-        LIMIT 1
-        """.format(TABLE_REF)
-        
-        job_config_like = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("question_like", "STRING", f"%{question_normal}%")
-            ]
-        )
-        
-        query_job_like = bq_client.query(query_like, job_config=job_config_like)
-        results_like = list(query_job_like.result())
-        
-        if results_like:
-            logger.info("Ditemukan partial match")
-            return results_like[0].answer
+        try:
+            logger.info("Tidak ditemukan exact match, mencoba dengan LIKE")
+            query_like = """
+            SELECT answer 
+            FROM `{0}` 
+            WHERE question_normal LIKE @question_like
+            ORDER BY LENGTH(question_normal) ASC
+            LIMIT 1
+            """.format(TABLE_REF)
+            
+            job_config_like = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("question_like", "STRING", f"%{question_normal}%")
+                ]
+            )
+            
+            logger.info(f"Menjalankan query LIKE: {query_like}")
+            query_job_like = bq_client.query(query_like, job_config=job_config_like)
+            results_like = list(query_job_like.result())
+            
+            if results_like:
+                logger.info("Ditemukan partial match")
+                return results_like[0].answer
+        except Exception as e:
+            logger.error(f"Error pada query LIKE: {e}", exc_info=True)
         
         logger.info("Tidak ditemukan jawaban di database")
         return "Jawaban tidak ditemukan di database. Coba gunakan kata kunci yang lebih spesifik."
