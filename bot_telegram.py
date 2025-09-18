@@ -5,6 +5,7 @@ import json
 import logging
 import datetime
 import csv
+import uuid
 from tempfile import NamedTemporaryFile
 from typing import List, Tuple
 
@@ -48,8 +49,6 @@ def initialize_services():
                 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_file.name
         else:
             logger.warning("SERVICE_ACCOUNT_JSON tidak ditemukan di environment variables")
-            # Coba gunakan default credentials (untuk environment seperti Railway)
-            # Railway akan secara otomatis menyediakan credentials melalui environment variables
         
         # Inisialisasi clients
         bq_client = bigquery.Client(project=PROJECT_ID)
@@ -60,37 +59,63 @@ def initialize_services():
         logger.error(f"Gagal menginisialisasi services: {e}")
         raise
 
+def normalize_question(question: str) -> str:
+    """Normalisasi pertanyaan untuk pencarian: lowercase, hapus karakter khusus, hapus spasi berlebihan"""
+    try:
+        # Ubah ke lowercase
+        normalized = question.lower()
+        # Hapus karakter khusus (selain huruf, angka, dan spasi)
+        normalized = re.sub(r'[^\w\s]', '', normalized)
+        # Ganti multiple spaces dengan single space
+        normalized = re.sub(r'\s+', ' ', normalized)
+        return normalized.strip()
+    except Exception as e:
+        logger.error(f"Error normalisasi pertanyaan: {e}")
+        return question.lower().strip()
+
 # =======================
 # ⚙️ FUNGSI UTAMA
 # =======================
 
-def simpan_soal(soal: str, jawaban: str, source: str = "manual") -> bool:
-    """Simpan soal ke BigQuery (hindari duplikat)"""
+def simpan_soal(question: str, answer: str, source: str = "manual") -> bool:
+    """Simpan soal ke BigQuery dengan struktur tabel baru"""
     try:
-        soal, jawaban = str(soal).strip(), str(jawaban).strip()
-        if not soal or not jawaban:
+        question, answer = str(question).strip(), str(answer).strip()
+        if not question or not answer:
             logger.warning("Soal atau jawaban kosong, tidak disimpan")
             return False
 
-        # Cek duplikat
+        # Normalisasi pertanyaan
+        question_normalized = normalize_question(question)
+
+        # Cek duplikat berdasarkan question_normalized
         query = f"""
         SELECT COUNT(*) as count 
         FROM `{TABLE_REF}` 
-        WHERE LOWER(soal) = LOWER('{soal.replace("'", "''")}')
+        WHERE question_normalized = @question_normalized
         """
-        query_job = bq_client.query(query)
+        
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("question_normalized", "STRING", question_normalized)
+            ]
+        )
+        
+        query_job = bq_client.query(query, job_config=job_config)
         result = list(query_job.result())[0]
         
         if result.count > 0:
             logger.info("Soal sudah ada di database, tidak disimpan lagi")
             return False
 
-        # Insert data baru
+        # Insert data baru dengan struktur tabel baru
         rows_to_insert = [{
-            "soal": soal,
-            "jawaban": jawaban,
+            "id": str(uuid.uuid4()),
+            "question": question,
+            "question_normalized": question_normalized,
+            "answer": answer,
             "source": source,
-            "created_at": datetime.datetime.now().isoformat()
+            "timestamp": datetime.datetime.utcnow().isoformat() + "Z"  # Format ISO dengan timezone Z (UTC)
         }]
 
         errors = bq_client.insert_json(TABLE_REF, rows_to_insert)
@@ -110,7 +135,7 @@ def parse_qa_text(text: str) -> List[Tuple[str, str]]:
     try:
         # Pattern untuk mendeteksi format Q: dan A:
         pattern = r'(?i)(Q:|Pertanyaan:|Soal:)\s*(.*?)(?=(?:A:|Jawaban:|$))(?:\s*(?:A:|Jawaban:)\s*(.*))?'
-        matches = re.findall(pattern, text, re.DOTNAME)
+        matches = re.findall(pattern, text, re.DOTALL)
         
         for match in matches:
             question = match[1].strip()
@@ -147,15 +172,15 @@ def ocr_with_google_vision(image_content: bytes) -> str:
         return ""
 
 def find_question_answer_columns(headers: List[str]) -> Tuple[List[int], List[int]]:
-    """Mencari indeks kolom yang mengandung 'soal' dan 'jawaban' dalam header"""
+    """Mencari indeks kolom yang mengandung 'question' dan 'answer' dalam header"""
     question_indices = []
     answer_indices = []
     
     for i, header in enumerate(headers):
         header_lower = header.lower()
-        if any(keyword in header_lower for keyword in ['soal', 'pertanyaan', 'question']):
+        if any(keyword in header_lower for keyword in ['question', 'soal', 'pertanyaan']):
             question_indices.append(i)
-        if any(keyword in header_lower for keyword in ['jawaban', 'answer', 'kunci']):
+        if any(keyword in header_lower for keyword in ['answer', 'jawaban', 'kunci']):
             answer_indices.append(i)
     
     return question_indices, answer_indices
@@ -164,22 +189,51 @@ def find_answer_from_question(question: str) -> str:
     """Mencari jawaban dari database berdasarkan pertanyaan"""
     try:
         # Normalisasi pertanyaan untuk pencarian
-        question_normalized = re.sub(r'\s+', ' ', question.lower().strip())
+        question_normalized = normalize_question(question)
         
-        query = f"""
-        SELECT jawaban 
-        FROM `{TABLE_REF}` 
-        WHERE LOWER(REPLACE(soal, ' ', '')) LIKE '%{question_normalized.replace(" ", "").replace("'", "''")}%'
+        # Pertama coba exact match
+        query = """
+        SELECT answer 
+        FROM `{0}` 
+        WHERE question_normalized = @question_normalized
         LIMIT 1
-        """
+        """.format(TABLE_REF)
         
-        query_job = bq_client.query(query)
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("question_normalized", "STRING", question_normalized)
+            ]
+        )
+        
+        query_job = bq_client.query(query, job_config=job_config)
         results = list(query_job.result())
         
-        return results[0].jawaban if results else "Jawaban tidak ditemukan di database."
+        if results:
+            return results[0].answer
+        
+        # Jika tidak ditemukan exact match, cari dengan LIKE (partial match)
+        query_like = """
+        SELECT answer 
+        FROM `{0}` 
+        WHERE question_normalized LIKE @question_like
+        LIMIT 1
+        """.format(TABLE_REF)
+        
+        job_config_like = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("question_like", "STRING", f"%{question_normalized}%")
+            ]
+        )
+        
+        query_job_like = bq_client.query(query_like, job_config=job_config_like)
+        results_like = list(query_job_like.result())
+        
+        return results_like[0].answer if results_like else "Jawaban tidak ditemukan di database."
+            
     except Exception as e:
-        logger.error(f"Error mencari jawaban: {e}")
-        return "Terjadi error saat mencari jawaban."
+        logger.error(f"Error mencari jawaban: {str(e)}")
+        logger.error(f"Pertanyaan yang dicari: {question}")
+        return "Maaf, terjadi kesalahan saat mencari jawaban. Silakan coba lagi nanti."
 
 def process_csv_file(file_bytes: bytes) -> int:
     """Memproses file CSV tanpa menggunakan pandas"""
@@ -203,10 +257,10 @@ def process_csv_file(file_bytes: bytes) -> int:
         count_success = 0
         for row in csv_reader:
             if len(row) > max(question_cols[0], answer_cols[0]):
-                soal = row[question_cols[0]].strip()
-                jawaban = row[answer_cols[0]].strip()
+                question = row[question_cols[0]].strip()
+                answer = row[answer_cols[0]].strip()
                 
-                if soal and jawaban and simpan_soal(soal, jawaban, "csv_upload"):
+                if question and answer and simpan_soal(question, answer, "csv_upload"):
                     count_success += 1
                     
         return count_success
@@ -283,9 +337,9 @@ async def tambah_soal(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Format salah. Pastikan ada soal dan jawaban.\nContoh: /tambah Siapa presiden pertama Indonesia? | Soekarno")
             return
         
-        soal, jawaban = parts[0].strip(), parts[1].strip()
+        question, answer = parts[0].strip(), parts[1].strip()
         
-        if simpan_soal(soal, jawaban, f"telegram_{user.id}"):
+        if simpan_soal(question, answer, f"telegram_{user.id}"):
             await update.message.reply_text("Soal dan jawaban berhasil ditambahkan!")
         else:
             await update.message.reply_text("Gagal menambahkan soal. Mungkin soal sudah ada di database.")
@@ -299,21 +353,26 @@ async def cari_jawaban_teks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk mencari jawaban dari bank soal berdasarkan teks"""
     try:
         user = update.effective_user
-        pertanyaan = update.message.text.strip()
-        logger.info(f"User {user.username} ({user.id}) mencari jawaban untuk: {pertanyaan}")
+        question = update.message.text.strip()
+        logger.info(f"User {user.username} ({user.id}) mencari jawaban untuk: {question}")
+        
+        # Periksa koneksi database sebelum melanjutkan
+        if bq_client is None:
+            await update.message.reply_text("Maaf, database sedang tidak tersedia. Silakan coba lagi nanti.")
+            return
         
         # Tampilkan status sedang mencari
         await update.message.reply_chat_action(action="typing")
         
         # Cari jawaban
-        jawaban = find_answer_from_question(pertanyaan)
+        answer = find_answer_from_question(question)
         
         # Kirim jawaban
-        await update.message.reply_text(f"Jawaban: {jawaban}")
+        await update.message.reply_text(f"Pertanyaan: {question}\n\nJawaban: {answer}")
         
     except Exception as e:
         logger.error(f"Error mencari jawaban teks: {e}")
-        await update.message.reply_text("Terjadi error saat mencari jawaban. Silakan coba lagi nanti.")
+        await update.message.reply_text("Maaf, terjadi kesalahan saat mencari jawaban. Silakan coba lagi nanti.")
 
 # Cari jawaban dari gambar
 async def cari_jawaban_gambar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -333,17 +392,17 @@ async def cari_jawaban_gambar(update: Update, context: ContextTypes.DEFAULT_TYPE
         file_bytes = await file.download_as_bytearray()
         
         # Lakukan OCR
-        teks_hasil_ocr = ocr_with_google_vision(bytes(file_bytes))
+        ocr_text = ocr_with_google_vision(bytes(file_bytes))
         
-        if not teks_hasil_ocr:
+        if not ocr_text:
             await update.message.reply_text("Tidak dapat membaca teks dari gambar. Pastikan gambar jelas dan berisi teks.")
             return
         
         # Cari jawaban berdasarkan teks hasil OCR
-        jawaban = find_answer_from_question(teks_hasil_ocr)
+        answer = find_answer_from_question(ocr_text)
         
         # Kirim hasil
-        await update.message.reply_text(f"Teks terdeteksi: {teks_hasil_ocr}\n\nJawaban: {jawaban}")
+        await update.message.reply_text(f"Teks terdeteksi: {ocr_text}\n\nJawaban: {answer}")
         
     except Exception as e:
         logger.error(f"Error mencari jawaban gambar: {e}")
@@ -369,13 +428,13 @@ async def ocr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_bytes = await file.download_as_bytearray()
         
         # Lakukan OCR
-        teks_hasil_ocr = ocr_with_google_vision(bytes(file_bytes))
+        ocr_text = ocr_with_google_vision(bytes(file_bytes))
         
-        if not teks_hasil_ocr:
+        if not ocr_text:
             await update.message.reply_text("Tidak dapat membaca teks dari gambar.")
             return
         
-        await update.message.reply_text(f"Hasil OCR:\n\n{teks_hasil_ocr}")
+        await update.message.reply_text(f"Hasil OCR:\n\n{ocr_text}")
         
     except Exception as e:
         logger.error(f"Error di command /ocr: {e}")
@@ -409,7 +468,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if count_success > 0:
             await update.message.reply_text(f"File berhasil diproses. {count_success} soal ditambahkan ke database.")
         else:
-            await update.message.reply_text("Gagal memproses file. Pastikan format file benar dan memiliki kolom 'soal' dan 'jawaban'.")
+            await update.message.reply_text("Gagal memproses file. Pastikan format file benar dan memiliki kolom 'question' dan 'answer'.")
             
     except Exception as e:
         logger.error(f"Error handling file: {e}")
