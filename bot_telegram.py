@@ -10,7 +10,7 @@ from tempfile import NamedTemporaryFile
 from typing import List, Tuple
 from collections import Counter
 import math
-import requests  # Tambahkan import requests
+import requests
 
 from google.cloud import bigquery
 from google.cloud import vision
@@ -97,6 +97,23 @@ def normalize_question(question: str) -> str:
         logger.error(f"Error normalisasi pertanyaan: {e}")
         return question.lower().strip()
 
+def clean_ocr_text(text: str) -> str:
+    """Membersihkan teks hasil OCR dari format tambahan seperti timestamp"""
+    try:
+        # Hapus timestamp di awal (format HH:MM)
+        cleaned = re.sub(r'^\d{1,2}:\d{2}\s*', '', text)
+        
+        # Hapus karakter khusus yang tidak perlu
+        cleaned = re.sub(r'[^\w\s\?\.\,\!\-\:]', ' ', cleaned)
+        
+        # Hapus spasi berlebih
+        cleaned = re.sub(r'\s+', ' ', cleaned)
+        
+        return cleaned.strip()
+    except Exception as e:
+        logger.error(f"Error membersihkan teks OCR: {e}")
+        return text
+
 def get_keywords(text: str) -> List[str]:
     """Ekstrak kata kunci dari teks"""
     words = text.split()
@@ -124,6 +141,25 @@ def calculate_similarity(query: str, document: str) -> float:
     
     # Jaccard similarity
     return len(intersection) / len(union) if union else 0
+
+def is_except_question(question: str) -> bool:
+    """Mendeteksi apakah pertanyaan mengandung kata 'kecuali'"""
+    except_keywords = ['kecuali', 'bukan', 'tidak termasuk', 'kecuali']
+    return any(keyword in question.lower() for keyword in except_keywords)
+
+def handle_short_questions(question: str) -> str:
+    """Menangani pertanyaan singkat yang umum"""
+    question_lower = question.lower().strip()
+    
+    # Daftar pertanyaan singkat dan jawabannya
+    short_answers = {
+        "nama saya adalah ?": "muhammad alrafka firdaus",
+        "siapa nama saya?": "muhammad alrafka firdaus",
+        "nama saya": "muhammad alrafka firdaus",
+        # Tambahkan pertanyaan singkat lainnya di sini
+    }
+    
+    return short_answers.get(question_lower, "")
 
 # =======================
 # ⚙️ FUNGSI UTAMA
@@ -218,7 +254,11 @@ def ocr_with_google_vision(image_content: bytes) -> str:
             logger.error(f"Error OCR: {response.error.message}")
             return ""
         
-        return response.text_annotations[0].text if response.text_annotations else ""
+        raw_text = response.text_annotations[0].text if response.text_annotations else ""
+        # Bersihkan teks hasil OCR
+        cleaned_text = clean_ocr_text(raw_text)
+        logger.info(f"OCR raw: '{raw_text}' -> cleaned: '{cleaned_text}'")
+        return cleaned_text
     except Exception as e:
         logger.error(f"Error dalam OCR: {e}")
         return ""
@@ -260,7 +300,11 @@ def ocr_with_ocr_space(image_content: bytes) -> str:
         if result.get('OCRExitCode') == 1:  # Sukses
             parsed_results = result.get('ParsedResults', [])
             if parsed_results:
-                return parsed_results[0].get('ParsedText', '')
+                raw_text = parsed_results[0].get('ParsedText', '')
+                # Bersihkan teks hasil OCR
+                cleaned_text = clean_ocr_text(raw_text)
+                logger.info(f"OCR.Space raw: '{raw_text}' -> cleaned: '{cleaned_text}'")
+                return cleaned_text
         else:
             logger.error(f"OCR.Space error: {result.get('ErrorMessage', 'Unknown error')}")
             return ""
@@ -291,6 +335,11 @@ def find_answer_from_question(question: str) -> str:
         if bq_client is None:
             logger.error("BigQuery client tidak tersedia")
             return "Maaf, database sedang tidak tersedia. Silakan coba lagi nanti."
+        
+        # Cek dulu apakah pertanyaan termasuk pertanyaan singkat
+        short_answer = handle_short_questions(question)
+        if short_answer:
+            return short_answer
         
         # Normalisasi pertanyaan untuk pencarian
         question_normalized = normalize_question(question)
