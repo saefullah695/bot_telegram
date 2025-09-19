@@ -124,7 +124,7 @@ def calculate_similarity(query: str, document: str) -> float:
     union = query_words.union(doc_words)
     
     # Jaccard similarity
-    return len(intersection) / len(union) if union else 0
+    return len(intion) / len(union) if union else 0
 
 # =======================
 # 🔍 FUNGSI OCR DENGAN FALLBACK
@@ -145,19 +145,24 @@ def ocr_with_google_vision(image_content: bytes) -> str:
         logger.error(f"Error dalam OCR Google Vision: {e}")
         return ""
 
-def ocr_with_ocrspace(image_content: bytes) -> str:
+def ocr_with_ocrspace(image_content: bytes, filename: str = 'image.jpg') -> str:
     """Melakukan OCR menggunakan OCR.Space API sebagai fallback"""
     try:
         payload = {
+            'isOverlayRequired': False,
             'apikey': OCR_SPACE_API_KEY,
             'language': 'ind,eng',  # Prioritaskan Indonesia, lalu Inggris
-            'isOverlayRequired': False,
             'OCREngine': 2  # Gunakan engine 2 untuk akurasi lebih baik
         }
         
-        files = {'image': ('image.jpg', image_content, 'image/jpeg')}
+        files = {'image': (filename, image_content, 'image/jpeg')}
         
-        response = requests.post(OCR_SPACE_URL, files=files, data=payload, timeout=30)
+        response = requests.post(
+            OCR_SPACE_URL,
+            files=files,
+            data=payload,
+            timeout=30
+        )
         response.raise_for_status()
         
         result = response.json()
