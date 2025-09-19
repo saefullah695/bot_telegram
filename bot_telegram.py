@@ -97,6 +97,35 @@ def normalize_question(question: str) -> str:
         logger.error(f"Error normalisasi pertanyaan: {e}")
         return question.lower().strip()
 
+def clean_multiple_choice_question(text: str) -> str:
+    """Membersihkan dan memformat ulang pertanyaan pilihan ganda dari hasil OCR"""
+    try:
+        # Pola untuk mendeteksi pertanyaan pilihan ganda
+        # Mencari pola: "dari [kata-kata] [opsi1] [opsi2] ..."
+        pattern = r'(dari\s+)(.*?)(?=\s*[A-Z][a-z]+\s+[A-Z][a-z]+|$)'
+        match = re.search(pattern, text, re.IGNORECASE)
+        
+        if match:
+            # Ambil bagian setelah kata "dari"
+            after_dari = text[match.end(1):]
+            
+            # Pisahkan opsi-opsi (asumsi opsi dimulai dengan huruf kapital)
+            options = re.findall(r'[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*', after_dari)
+            
+            if len(options) > 1:  # Jika ditemukan beberapa opsi
+                # Rekonstruksi pertanyaan dengan format yang benar
+                question_part = text[:match.start(1)] + "dari….: "
+                options_str = "; ".join(options)
+                cleaned_question = question_part + options_str
+                
+                logger.info(f"Reformatted multiple choice: '{text}' -> '{cleaned_question}'")
+                return cleaned_question
+        
+        return text
+    except Exception as e:
+        logger.error(f"Error cleaning multiple choice question: {e}")
+        return text
+
 def clean_ocr_text(text: str) -> str:
     """Membersihkan teks hasil OCR dari format tambahan seperti timestamp"""
     try:
@@ -104,10 +133,13 @@ def clean_ocr_text(text: str) -> str:
         cleaned = re.sub(r'^\d{1,2}:\d{2}\s*', '', text)
         
         # Hapus karakter khusus yang tidak perlu
-        cleaned = re.sub(r'[^\w\s\?\.\,\!\-\:]', ' ', cleaned)
+        cleaned = re.sub(r'[^\w\s\?\.\,\!\-\:;]', ' ', cleaned)
         
         # Hapus spasi berlebih
         cleaned = re.sub(r'\s+', ' ', cleaned)
+        
+        # Format ulang pertanyaan pilihan ganda
+        cleaned = clean_multiple_choice_question(cleaned)
         
         return cleaned.strip()
     except Exception as e:
