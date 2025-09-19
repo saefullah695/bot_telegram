@@ -6,7 +6,6 @@ import logging
 import datetime
 import csv
 import uuid
-import requests
 from tempfile import NamedTemporaryFile
 from typing import List, Tuple
 from collections import Counter
@@ -31,107 +30,18 @@ DATASET_ID = os.getenv("DATASET_ID", "bot_telegram_gabung")
 TABLE_ID = os.getenv("TABLE_ID", "banksoal")
 TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 
-# Konfigurasi OCR
-OCR_API_KEY = "K84451990188957"
-OCR_API_URL = "https://api.ocr.space/parse/image"
-
 # Global clients
 bq_client = None
 vision_client = None
 
-# Daftar stopwords untuk bahasa Indonesia
-STOPWORDS_ID = {
+# Daftar stopwords (kata umum yang diabaikan)
+STOPWORDS = {
     'yang', 'dan', 'di', 'ke', 'dari', 'pada', 'adalah', 'itu', 'dengan', 
     'untuk', 'tidak', 'ini', 'dalam', 'akan', 'juga', 'atau', 'karena',
     'seperti', 'jika', 'saya', 'anda', 'kami', 'mereka', 'ada', 'bisa',
     'dapat', 'lebih', 'sudah', 'belum', 'bisa', 'dapat', 'yaitu', 'yakni',
-    'adalah', 'ialah', 'merupakan', 'tersebut', 'tersebutlah', 'oleh',
-    'sebuah', 'para', 'bagi', 'antar', 'dalam', 'terhadap', 'sampai',
-    'setelah', 'sebelum', 'sejak', 'selama', 'tentang', 'agar', 'supaya',
-    'hingga', 'sampai', 'sedangkan', 'melainkan', 'tetapi', 'namun'
+    'adalah', 'ialah', 'merupakan', 'tersebut', 'tersebutlah'
 }
-
-# Daftar stopwords untuk bahasa Inggris
-STOPWORDS_EN = {
-    'the', 'be', 'to', 'of', 'and', 'a', 'in', 'that', 'have', 'i',
-    'it', 'for', 'not', 'on', 'with', 'he', 'as', 'you', 'do', 'at',
-    'this', 'but', 'his', 'by', 'from', 'they', 'we', 'say', 'her',
-    'she', 'or', 'an', 'will', 'my', 'one', 'all', 'would', 'there',
-    'their', 'what', 'so', 'up', 'out', 'if', 'about', 'who', 'get',
-    'which', 'go', 'me', 'when', 'make', 'can', 'like', 'time', 'no',
-    'just', 'him', 'know', 'take', 'people', 'into', 'year', 'your',
-    'good', 'some', 'could', 'them', 'see', 'other', 'than', 'then',
-    'now', 'look', 'only', 'come', 'its', 'over', 'think', 'also',
-    'back', 'after', 'use', 'two', 'how', 'our', 'work', 'first',
-    'well', 'way', 'even', 'new', 'want', 'because', 'any', 'these',
-    'give', 'day', 'most', 'us'
-}
-
-# Daftar stopwords gabungan
-STOPWORDS = STOPWORDS_ID.union(STOPWORDS_EN)
-
-# Daftar sinonim untuk bahasa Indonesia
-SINONIM_ID = {
-    'prosedur': ['proses', 'cara', 'langkah', 'metode'],
-    'personil': ['pegawai', 'karyawan', 'staf', 'tenaga kerja'],
-    'toko': ['outlet', 'gerai', 'cabang', 'toko'],
-    'barang': ['produk', 'item', 'material', 'benda'],
-    'rusak': ['cacat', 'defect', 'error', 'salah'],
-    'pengiriman': ['kirim', 'antar', 'delivery', 'pengantaran'],
-    'supplier': ['pemasok', 'vendor', 'penyedia', 'pemasok'],
-    'stock': ['stok', 'persediaan', 'inventory', 'cadangan'],
-    'opname': ['cek', 'hitung', 'audit', 'pemeriksaan'],
-    'konsumen': ['pelanggan', 'customer', 'pembeli', 'konsumen'],
-    'admin': ['operator', 'pengelola', 'manager', 'administrator'],
-    'area': ['wilayah', 'daerah', 'region', 'area'],
-    'manager': ['pemimpin', 'kepala', 'supervisor', 'manajer'],
-    'coordinator': ['koordinator', 'pengatur', 'penyelenggara', 'koordinator'],
-    'hitung': ['kalkulasi', 'perhitungan', 'menghitung'],
-    'lakukan': ['kerjakan', 'laksanakan', 'eksekusi'],
-    'dapatkan': ['peroleh', 'canai', 'dapatkan'],
-    'gunakan': 'pakai',
-    'cari': ['temukan', 'gali', 'telusuri'],
-    'buat': ['ciptakan', 'hasilkan', 'lakukan'],
-    'tambah': ['tambahkan', 'plus', 'lebih'],
-    'kurang': ['kurangi', 'minus', 'sedikit'],
-    'ubah': ['modifikasi', 'rubah', 'ganti'],
-    'hasil': ['output', 'result', 'outcome'],
-    'masalah': ['problem', 'isu', 'kendala'],
-    'solusi': ['penyelesaian', 'jawaban', 'solution'],
-    'data': ['informasi', 'rekaman', 'catatan'],
-    'sistem': ['system', 'struktur', 'kerangka']
-}
-
-# Daftar sinonim untuk bahasa Inggris
-SINONIM_EN = {
-    'procedure': ['process', 'method', 'steps', 'way'],
-    'personnel': ['staff', 'employee', 'worker', 'team'],
-    'store': ['shop', 'outlet', 'retail', 'market'],
-    'goods': ['products', 'items', 'merchandise', 'commodities'],
-    'damaged': ['broken', 'defective', 'faulty', 'impaired'],
-    'delivery': ['shipping', 'transport', 'distribution', 'dispatch'],
-    'supplier': ['vendor', 'provider', 'distributor', 'source'],
-    'stock': ['inventory', 'supply', 'reserve', 'accumulation'],
-    'count': ['calculate', 'tally', 'compute', 'reckon'],
-    'consumer': ['customer', 'client', 'buyer', 'purchaser'],
-    'admin': ['administrator', 'manager', 'operator', 'supervisor'],
-    'area': ['region', 'zone', 'district', 'territory'],
-    'manager': ['supervisor', 'director', 'executive', 'head'],
-    'coordinator': ['organizer', 'arranger', 'planner', 'facilitator'],
-    'find': ['search', 'look for', 'seek', 'discover'],
-    'make': ['create', 'produce', 'generate', 'build'],
-    'add': ['plus', 'include', 'append', 'attach'],
-    'remove': ['subtract', 'delete', 'eliminate', 'take away'],
-    'change': ['modify', 'alter', 'adjust', 'transform'],
-    'result': ['outcome', 'output', 'consequence', 'effect'],
-    'problem': ['issue', 'trouble', 'difficulty', 'challenge'],
-    'solution': ['answer', 'resolution', 'fix', 'remedy'],
-    'data': ['information', 'facts', 'details', 'records'],
-    'system': ['structure', 'framework', 'organization', 'arrangement']
-}
-
-# Daftar sinonim gabungan
-SINONIM = {**SINONIM_ID, **SINONIM_EN}
 
 # =======================
 # 🔑 SETUP BIGQUERY & GOOGLE VISION
@@ -151,18 +61,10 @@ def initialize_services():
         else:
             logger.warning("SERVICE_ACCOUNT_JSON tidak ditemukan di environment variables")
         
-        # Inisialisasi BigQuery client
+        # Inisialisasi clients
         bq_client = bigquery.Client(project=PROJECT_ID)
-        
-        # Inisialisasi Vision client (jika service account tersedia)
-        try:
-            vision_client = vision.ImageAnnotatorClient()
-            logger.info("Google Vision client berhasil diinisialisasi")
-        except Exception as e:
-            logger.warning(f"Gagal menginisialisasi Google Vision client: {e}")
-            vision_client = None
-        
-        logger.info("BigQuery client berhasil diinisialisasi")
+        vision_client = vision.ImageAnnotatorClient()
+        logger.info("BigQuery dan Vision clients berhasil diinisialisasi")
         
         # Test koneksi BigQuery
         try:
@@ -177,35 +79,6 @@ def initialize_services():
     except Exception as e:
         logger.error(f"Gagal menginisialisasi services: {e}")
         raise
-
-def detect_language(text: str) -> str:
-    """Deteksi bahasa dari teks (sederhana)"""
-    # Cek karakter khas bahasa Indonesia
-    indonesian_chars = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ')
-    text_chars = set(text.lower())
-    
-    # Hitung persentase karakter non-alfabet
-    non_alpha = sum(1 for c in text.lower() if c not in indonesian_chars)
-    non_alpha_ratio = non_alpha / len(text) if text else 0
-    
-    # Jika banyak karakter non-alfabet, kemungkinan bahasa Indonesia
-    if non_alpha_ratio > 0.1:
-        return 'id'
-    
-    # Cek kata-kata khas bahasa Indonesia
-    id_keywords = ['yang', 'dan', 'di', 'ke', 'dari', 'pada', 'adalah', 'untuk', 
-                   'tidak', 'dengan', 'ini', 'dalam', 'akan', 'juga', 'atau', 
-                   'karena', 'seperti', 'jika', 'saya', 'anda', 'kami', 'mereka']
-    
-    words = text.lower().split()
-    id_count = sum(1 for word in words if word in id_keywords)
-    
-    # Jika lebih dari 10% kata adalah kata khas Indonesia
-    if id_count / len(words) > 0.1 if words else False:
-        return 'id'
-    
-    # Default ke bahasa Inggris
-    return 'en'
 
 def normalize_question(question: str) -> str:
     """Normalisasi pertanyaan untuk pencarian"""
@@ -309,7 +182,7 @@ def parse_qa_text(text: str) -> List[Tuple[str, str]]:
     questions_answers = []
     try:
         # Pattern untuk mendeteksi format Q: dan A:
-        pattern = r'(?i)(Q:|Pertanyaan:|Soal:|Question:)\s*(.*?)(?=(?:A:|Jawaban:|Answer:|$))(?:\s*(?:A:|Jawaban:|Answer:)\s*(.*))?'
+        pattern = r'(?i)(Q:|Pertanyaan:|Soal:)\s*(.*?)(?=(?:A:|Jawaban:|$))(?:\s*(?:A:|Jawaban:)\s*(.*))?'
         matches = re.findall(pattern, text, re.DOTALL)
         
         for match in matches:
@@ -331,110 +204,20 @@ def parse_qa_text(text: str) -> List[Tuple[str, str]]:
     
     return questions_answers
 
-def ocr_with_ocr_space(image_content: bytes, language: str = 'eng') -> str:
-    """Melakukan OCR pada gambar menggunakan OCR.Space API"""
+def ocr_with_google_vision(image_content: bytes) -> str:
+    """Melakukan OCR pada gambar menggunakan Google Cloud Vision API"""
     try:
-        # Prepare the request
-        files = {'file': ('image.jpg', image_content, 'image/jpeg')}
-        data = {
-            'apikey': OCR_API_KEY,
-            'language': language,
-            'isOverlayRequired': 'false',
-            'detectOrientation': 'true',
-            'scale': 'true'
-        }
-        
-        # Send request to OCR.Space
-        response = requests.post(OCR_API_URL, files=files, data=data)
-        
-        if response.status_code != 200:
-            logger.error(f"OCR.Space API error: {response.status_code} - {response.text}")
-            return ""
-        
-        result = response.json()
-        
-        if result.get('OCRExitCode') != 1:
-            logger.error(f"OCR.Space processing error: {result.get('ErrorMessage', 'Unknown error')}")
-            return ""
-        
-        # Extract text from the result
-        parsed_results = result.get('ParsedResults', [])
-        if not parsed_results:
-            logger.warning("No parsed results from OCR.Space")
-            return ""
-        
-        extracted_text = ""
-        for parsed_result in parsed_results:
-            text_overlay = parsed_result.get('TextOverlay', {})
-            lines = text_overlay.get('Lines', [])
-            
-            for line in lines:
-                words = line.get('Words', [])
-                line_text = " ".join([word.get('WordText', '') for word in words])
-                extracted_text += line_text + "\n"
-        
-        logger.info(f"Berhasil mengekstrak teks dari gambar dengan OCR.Space ({language}), panjang: {len(extracted_text)} karakter")
-        return extracted_text.strip()
-    except Exception as e:
-        logger.error(f"Error dalam OCR.Space: {e}")
-        return ""
-
-def ocr_with_google_vision(image_content: bytes, language: str = 'en') -> str:
-    """Melakukan OCR pada gambar menggunakan Google Cloud Vision API (backup)"""
-    try:
-        if vision_client is None:
-            logger.warning("Google Vision client tidak tersedia")
-            return ""
-        
         image = vision.Image(content=image_content)
-        
-        # Set language hints
-        context = vision.ImageContext(
-            language_hints=[language]
-        )
-        
-        response = vision_client.document_text_detection(image=image, image_context=context)
+        response = vision_client.document_text_detection(image=image)
         
         if response.error.message:
-            logger.error(f"Google Vision API error: {response.error.message}")
+            logger.error(f"Error OCR: {response.error.message}")
             return ""
         
-        extracted_text = response.text_annotations[0].text if response.text_annotations else ""
-        logger.info(f"Berhasil mengekstrak teks dari gambar dengan Google Vision ({language}), panjang: {len(extracted_text)} karakter")
-        return extracted_text
+        return response.text_annotations[0].text if response.text_annotations else ""
     except Exception as e:
-        logger.error(f"Error dalam Google Vision: {e}")
+        logger.error(f"Error dalam OCR: {e}")
         return ""
-
-def ocr_with_fallback(image_content: bytes, text_language: str = None) -> str:
-    """Melakukan OCR dengan fallback mechanism"""
-    # Deteksi bahasa jika tidak ditentukan
-    if text_language is None:
-        text_language = 'eng'  # Default ke Inggris
-    
-    # Konversi kode bahasa
-    ocr_language = 'eng' if text_language == 'en' else 'ind'
-    vision_language = 'en' if text_language == 'en' else 'id'
-    
-    # Coba OCR.Space terlebih dahulu
-    logger.info(f"Mencoba OCR dengan OCR.Space (bahasa: {ocr_language})...")
-    ocr_text = ocr_with_ocr_space(image_content, ocr_language)
-    
-    if ocr_text:
-        logger.info("OCR.Space berhasil, mengembalikan hasil")
-        return ocr_text
-    
-    # Jika OCR.Space gagal, coba Google Vision
-    logger.info(f"OCR.Space gagal, mencoba fallback ke Google Vision (bahasa: {vision_language})...")
-    ocr_text = ocr_with_google_vision(image_content, vision_language)
-    
-    if ocr_text:
-        logger.info("Google Vision berhasil sebagai fallback")
-        return ocr_text
-    
-    # Jika keduanya gagal
-    logger.error("Kedua metode OCR gagal")
-    return ""
 
 def find_question_answer_columns(headers: List[str]) -> Tuple[List[int], List[int]]:
     """Mencari indeks kolom yang mengandung 'question' dan 'answer' dalam header"""
@@ -632,12 +415,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"User {user.username} ({user.id}) menggunakan command /start")
         
         welcome_text = (
-            "🌟 Halo! Saya adalah bot pencari jawaban multibahasa. Saya dapat membantu Anda:\n\n"
-            "📝 1. Mencari jawaban dari pertanyaan teks - langsung ketik pertanyaan Anda\n"
-            "🖼️ 2. Mencari jawaban dari gambar - kirim gambar berisi pertanyaan\n"
-            "➕ 3. Menambah soal dan jawaban ke database - gunakan /tambah\n"
-            "📊 4. Memproses file CSV - kirim file tersebut\n\n"
-            "🌍 Saya mendukung bahasa Indonesia dan Inggris!\n\n"
+            "Halo! Saya adalah bot pencari jawaban dengan akurasi tinggi. Saya dapat membantu Anda:\n\n"
+            "1. Mencari jawaban dari pertanyaan teks - langsung ketik pertanyaan Anda\n"
+            "2. Mencari jawaban dari gambar - kirim gambar berisi pertanyaan\n"
+            "3. Menambah soal dan jawaban ke database - gunakan /tambah\n"
+            "4. Memproses file CSV - kirim file tersebut\n\n"
             "Gunakan /help untuk info lebih lanjut."
         )
         
@@ -652,19 +434,16 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         help_text = (
             "📚 BOT PENCARI JAWABAN - BANTUAN\n\n"
-            "🔹 Perintah yang tersedia:\n"
-            "   /start - Memulai bot\n"
-            "   /help - Menampilkan bantuan ini\n"
-            "   /tambah [soal] | [jawaban] - Menambah soal dan jawaban ke database\n"
-            "   /ocr - Melakukan OCR pada gambar yang dikirim sebelumnya\n\n"
-            "🔹 Cara penggunaan:\n"
-            "   1. Untuk mencari jawaban, ketik langsung pertanyaan Anda\n"
-            "   2. Untuk mencari jawaban dari gambar, kirim gambar berisi pertanyaan\n"
-            "   3. Untuk menambah data, gunakan /tambah atau kirim file CSV\n\n"
-            "🌍 Dukungan Bahasa:\n"
-            "   • Indonesia (Bahasa Indonesia)\n"
-            "   • English (Bahasa Inggris)\n\n"
-            "🤖 Bot menggunakan OCR.Space dan Google Vision sebagai backup!"
+            "Perintah yang tersedia:\n"
+            "/start - Memulai bot\n"
+            "/help - Menampilkan bantuan ini\n"
+            "/tambah [soal] | [jawaban] - Menambah soal dan jawaban ke database\n"
+            "/ocr - Melakukan OCR pada gambar yang dikirim sebelumnya\n\n"
+            "Cara penggunaan:\n"
+            "1. Untuk mencari jawaban, ketik langsung pertanyaan Anda\n"
+            "2. Untuk mencari jawaban dari gambar, kirim gambar berisi pertanyaan\n"
+            "3. Untuk menambah data, gunakan /tambah atau kirim file CSV\n\n"
+            "Bot menggunakan algoritma pencarian bertahap untuk hasil yang akurat!"
         )
         
         await update.message.reply_text(help_text)
@@ -697,7 +476,7 @@ async def tambah_soal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         question, answer = parts[0].strip(), parts[1].strip()
         
         if simpan_soal(question, answer, f"telegram_{user.id}"):
-            await update.message.reply_text("Soal dan jawaban berhasil ditambahkan! ✅")
+            await update.message.reply_text("Soal dan jawaban berhasil ditambahkan!")
         else:
             await update.message.reply_text("Gagal menambahkan soal. Mungkin soal sudah ada di database.")
             
@@ -753,13 +532,8 @@ async def cari_jawaban_gambar(update: Update, context: ContextTypes.DEFAULT_TYPE
         file = await context.bot.get_file(file_id)
         file_bytes = await file.download_as_bytearray()
         
-        # Deteksi bahasa dari caption jika ada
-        text_language = None
-        if update.message.caption:
-            text_language = detect_language(update.message.caption)
-        
-        # Lakukan OCR dengan fallback mechanism
-        ocr_text = ocr_with_fallback(bytes(file_bytes), text_language)
+        # Lakukan OCR
+        ocr_text = ocr_with_google_vision(bytes(file_bytes))
         
         if not ocr_text:
             await update.message.reply_text("Tidak dapat membaca teks dari gambar. Pastikan gambar jelas dan berisi teks.")
@@ -799,13 +573,8 @@ async def ocr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(file_id)
         file_bytes = await file.download_as_bytearray()
         
-        # Deteksi bahasa dari pesan yang dibalas
-        text_language = None
-        if update.message.reply_to_message and update.message.reply_to_message.caption:
-            text_language = detect_language(update.message.reply_to_message.caption)
-        
-        # Lakukan OCR dengan fallback mechanism
-        ocr_text = ocr_with_fallback(bytes(file_bytes), text_language)
+        # Lakukan OCR
+        ocr_text = ocr_with_google_vision(bytes(file_bytes))
         
         if not ocr_text:
             await update.message.reply_text("Tidak dapat membaca teks dari gambar.")
@@ -843,7 +612,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count_success = process_csv_file(file_bytes)
         
         if count_success > 0:
-            await update.message.reply_text(f"File berhasil diproses. {count_success} soal ditambahkan ke database. ✅")
+            await update.message.reply_text(f"File berhasil diproses. {count_success} soal ditambahkan ke database.")
         else:
             await update.message.reply_text("Gagal memproses file. Pastikan format file benar dan memiliki kolom 'question' dan 'answer'.")
             
