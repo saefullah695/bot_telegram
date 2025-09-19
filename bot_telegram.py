@@ -6,14 +6,13 @@ import logging
 import datetime
 import csv
 import uuid
+import requests
 from tempfile import NamedTemporaryFile
 from typing import List, Tuple
 from collections import Counter
 import math
 
 from google.cloud import bigquery
-from google.cloud import vision
-from google.cloud.vision import ImageAnnotatorClient
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -30,9 +29,12 @@ DATASET_ID = os.getenv("DATASET_ID", "bot_telegram_gabung")
 TABLE_ID = os.getenv("TABLE_ID", "banksoal")
 TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 
+# Konfigurasi OCR.Space
+OCR_API_KEY = "K84451990188957"
+OCR_API_URL = "https://api.ocr.space/parse/image"
+
 # Global clients
 bq_client = None
-vision_client = None
 
 # Daftar stopwords (kata umum yang diabaikan)
 STOPWORDS = {
@@ -44,12 +46,12 @@ STOPWORDS = {
 }
 
 # =======================
-# 🔑 SETUP BIGQUERY & GOOGLE VISION
+# 🔑 SETUP BIGQUERY
 # =======================
 
 def initialize_services():
-    """Inisialisasi BigQuery dan Google Vision Client"""
-    global bq_client, vision_client
+    """Inisialisasi BigQuery Client"""
+    global bq_client
     try:
         # Gunakan environment variable untuk service account
         service_account_info = os.getenv("SERVICE_ACCOUNT_JSON")
@@ -61,10 +63,9 @@ def initialize_services():
         else:
             logger.warning("SERVICE_ACCOUNT_JSON tidak ditemukan di environment variables")
         
-        # Inisialisasi clients
+        # Inisialisasi BigQuery client
         bq_client = bigquery.Client(project=PROJECT_ID)
-        vision_client = vision.ImageAnnotatorClient()
-        logger.info("BigQuery dan Vision clients berhasil diinisialisasi")
+        logger.info("BigQuery client berhasil diinisialisasi")
         
         # Test koneksi BigQuery
         try:
@@ -75,7 +76,7 @@ def initialize_services():
         except Exception as e:
             logger.error(f"Test koneksi BigQuery gagal: {e}")
             
-        return bq_client, vision_client
+        return bq_client
     except Exception as e:
         logger.error(f"Gagal menginisialisasi services: {e}")
         raise
@@ -204,17 +205,50 @@ def parse_qa_text(text: str) -> List[Tuple[str, str]]:
     
     return questions_answers
 
-def ocr_with_google_vision(image_content: bytes) -> str:
-    """Melakukan OCR pada gambar menggunakan Google Cloud Vision API"""
+def ocr_with_ocr_space(image_content: bytes) -> str:
+    """Melakukan OCR pada gambar menggunakan OCR.Space API"""
     try:
-        image = vision.Image(content=image_content)
-        response = vision_client.document_text_detection(image=image)
+        # Prepare the request
+        files = {'file': ('image.jpg', image_content, 'image/jpeg')}
+        data = {
+            'apikey': OCR_API_KEY,
+            'language': 'eng',
+            'isOverlayRequired': 'false',
+            'detectOrientation': 'true',
+            'scale': 'true'
+        }
         
-        if response.error.message:
-            logger.error(f"Error OCR: {response.error.message}")
+        # Send request to OCR.Space
+        response = requests.post(OCR_API_URL, files=files, data=data)
+        
+        if response.status_code != 200:
+            logger.error(f"OCR.Space API error: {response.status_code} - {response.text}")
             return ""
         
-        return response.text_annotations[0].text if response.text_annotations else ""
+        result = response.json()
+        
+        if result.get('OCRExitCode') != 1:
+            logger.error(f"OCR.Space processing error: {result.get('ErrorMessage', 'Unknown error')}")
+            return ""
+        
+        # Extract text from the result
+        parsed_results = result.get('ParsedResults', [])
+        if not parsed_results:
+            logger.warning("No parsed results from OCR.Space")
+            return ""
+        
+        extracted_text = ""
+        for parsed_result in parsed_results:
+            text_overlay = parsed_result.get('TextOverlay', {})
+            lines = text_overlay.get('Lines', [])
+            
+            for line in lines:
+                words = line.get('Words', [])
+                line_text = " ".join([word.get('WordText', '') for word in words])
+                extracted_text += line_text + "\n"
+        
+        logger.info(f"Berhasil mengekstrak teks dari gambar dengan panjang {len(extracted_text)} karakter")
+        return extracted_text.strip()
     except Exception as e:
         logger.error(f"Error dalam OCR: {e}")
         return ""
@@ -509,7 +543,7 @@ async def cari_jawaban_teks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         answer = find_answer_from_question(question)
         
         # Kirim jawaban
-        await update.message.reply_text(f"Pertanyaan: {question}\n\nJawaban: {answer}")
+        await update.message.message.reply_text(f"Pertanyaan: {question}\n\nJawaban: {answer}")
         
     except Exception as e:
         logger.error(f"Error mencari jawaban teks: {e}", exc_info=True)
@@ -532,8 +566,8 @@ async def cari_jawaban_gambar(update: Update, context: ContextTypes.DEFAULT_TYPE
         file = await context.bot.get_file(file_id)
         file_bytes = await file.download_as_bytearray()
         
-        # Lakukan OCR
-        ocr_text = ocr_with_google_vision(bytes(file_bytes))
+        # Lakukan OCR dengan OCR.Space
+        ocr_text = ocr_with_ocr_space(bytes(file_bytes))
         
         if not ocr_text:
             await update.message.reply_text("Tidak dapat membaca teks dari gambar. Pastikan gambar jelas dan berisi teks.")
@@ -573,8 +607,8 @@ async def ocr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(file_id)
         file_bytes = await file.download_as_bytearray()
         
-        # Lakukan OCR
-        ocr_text = ocr_with_google_vision(bytes(file_bytes))
+        # Lakukan OCR dengan OCR.Space
+        ocr_text = ocr_with_ocr_space(bytes(file_bytes))
         
         if not ocr_text:
             await update.message.reply_text("Tidak dapat membaca teks dari gambar.")
