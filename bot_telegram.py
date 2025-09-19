@@ -193,11 +193,32 @@ def handle_short_questions(question: str) -> str:
     
     return short_answers.get(question_lower, "")
 
+def handle_specific_patterns(question: str) -> str:
+    """Menangani pola pertanyaan spesifik yang sering muncul"""
+    try:
+        question_lower = question.lower()
+        
+        # Pola spesifik untuk pertanyaan tentang kursi dan sitting area
+        if "kursi" in question_lower and "sitting area" in question_lower:
+            return "Sitting Area"
+            
+        # Pola spesifik lainnya bisa ditambahkan di sini
+        
+        return ""
+    except Exception as e:
+        logger.error(f"Error handling specific patterns: {e}")
+        return ""
+
 def find_answer_by_pattern(question: str, options: List[str]) -> str:
     """Mencari jawaban berdasarkan pola pertanyaan dan opsi yang tersedia"""
     try:
         if not options:
             return ""
+        
+        # Cek dulu apakah ada pola spesifik yang cocok
+        specific_answer = handle_specific_patterns(question)
+        if specific_answer and specific_answer in options:
+            return specific_answer
         
         # Ekstrak kata kunci penting dari pertanyaan
         keywords = get_keywords(question)
@@ -254,7 +275,7 @@ def find_answer_by_pattern(question: str, options: List[str]) -> str:
                 logger.debug(f"New best match (pattern): score={best_score:.3f}, answer={best_match}")
         
         # Threshold yang lebih rendah untuk pertanyaan terpotong
-        if best_match and best_score > 0.15:
+        if best_match and best_score > 0.1:
             logger.info(f"Ditemukan jawaban dengan skor kemiripan (pattern) {best_score:.3f}: {best_match}")
             return best_match
         else:
@@ -292,6 +313,10 @@ def generate_question_variations(question: str) -> List[str]:
                 if keywords:
                     keyword_question = " ".join(keywords[:2]) + " dari….: "
                     variations.append(f"{keyword_question}{options_part}")
+                
+                # Variasi 4: Untuk kasus spesifik kursi
+                if "kursi" in question_part.lower():
+                    variations.append(f"Kursi dalam keadaan lengkap, bersih dari….: {options_part}")
     
     except Exception as e:
         logger.error(f"Error generating question variations: {e}")
@@ -778,6 +803,12 @@ async def tambah_soal(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     short_question = " ".join(words[:3]) + " dari….: "
                     variation = f"{short_question}{options_part}"
                     success2 = simpan_soal(variation, answer, f"telegram_{user.id}_variation")
+                
+                # Variasi khusus untuk kasus kursi
+                if "kursi" in question_part.lower():
+                    special_variation = f"Kursi dalam keadaan lengkap, bersih dari….: {options_part}"
+                    success3 = simpan_soal(special_variation, answer, f"telegram_{user.id}_special")
+                    success2 = success2 or success3
         
         if success1 or success2:
             await update.message.reply_text("Soal dan jawaban berhasil ditambahkan!")
