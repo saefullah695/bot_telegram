@@ -84,15 +84,25 @@ def initialize_services():
         logger.error(f"Gagal menginisialisasi services: {e}")
         raise
 
+def clean_text(text: str) -> str:
+    """Membersihkan teks dari semua tanda baca dan spasi berlebih"""
+    try:
+        # Hapus semua tanda baca
+        cleaned = re.sub(r'[^\w\s]', '', text.lower())
+        # Hapus spasi berlebih
+        cleaned = re.sub(r'\s+', ' ', cleaned)
+        return cleaned.strip()
+    except Exception as e:
+        logger.error(f"Error membersihkan teks: {e}")
+        return text.lower().strip()
+
 def normalize_question(question: str) -> str:
     """Normalisasi pertanyaan untuk pencarian"""
     try:
-        # Hapus karakter khusus, ubah ke lowercase, dan hapus spasi berlebih
-        normalized = re.sub(r'[^\w\s]', '', question.lower())  # Hapus karakter khusus
-        normalized = re.sub(r'\s+', ' ', normalized)  # Hapus spasi berlebih
-        result = normalized.strip()
-        logger.info(f"Normalisasi pertanyaan: '{question}' -> '{result}'")
-        return result
+        # Gunakan fungsi clean_text untuk menghapus tanda baca dan spasi berlebih
+        normalized = clean_text(question)
+        logger.info(f"Normalisasi pertanyaan: '{question}' -> '{normalized}'")
+        return normalized
     except Exception as e:
         logger.error(f"Error normalisasi pertanyaan: {e}")
         return question.lower().strip()
@@ -160,6 +170,116 @@ def handle_short_questions(question: str) -> str:
     }
     
     return short_answers.get(question_lower, "")
+
+def handle_not_found_answer(question: str) -> str:
+    """Fungsi khusus untuk menangani kasus ketika jawaban tidak ditemukan"""
+    try:
+        logger.info(f"Menangani pertanyaan tidak ditemukan: '{question}'")
+        
+        # Normalisasi pertanyaan dengan lebih ketat
+        normalized_question = clean_text(question)
+        
+        # Coba cari dengan normalisasi yang lebih ketat
+        try:
+            query = """
+            SELECT answer, question_normalized, question
+            FROM `{0}`
+            WHERE REPLACE(REPLACE(question_normalized, ' ', ''), '.', '') = REPLACE(REPLACE(@normalized_question, ' ', ''), '.', '')
+            LIMIT 5
+            """.format(TABLE_REF)
+            
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("normalized_question", "STRING", normalized_question)
+                ]
+            )
+            
+            query_job = bq_client.query(query, job_config=job_config)
+            results = list(query_job.result())
+            
+            if results:
+                logger.info("Ditemukan kemungkinan jawaban setelah normalisasi ketat")
+                # Hitung kemiripan untuk setiap hasil
+                best_match = None
+                best_score = 0
+                
+                for row in results:
+                    # Normalisasi pertanyaan dari database
+                    db_question_normalized = clean_text(row.question_normalized)
+                    
+                    # Hitung kemiripan
+                    score = calculate_similarity(normalized_question, db_question_normalized)
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_match = row.answer
+                
+                if best_match and best_score > 0.5:
+                    logger.info(f"Ditemukan jawaban dengan skor kemiripan {best_score:.3f}: {best_match}")
+                    return f"Pertanyaan: {question}\n\nJawaban: {best_match}"
+        except Exception as e:
+            logger.error(f"Error pada query normalisasi ketat: {e}")
+        
+        # Jika masih tidak ditemukan, coba dengan pendekatan kata kunci yang lebih longgar
+        try:
+            # Ekstrak kata kunci dari pertanyaan
+            keywords = get_keywords(normalized_question)
+            
+            if not keywords:
+                logger.warning("Tidak ada kata kunci yang ditemukan setelah normalisasi ketat")
+                return "Maaf, jawaban tidak ditemukan di database. Silakan coba dengan kata kunci yang lebih spesifik."
+            
+            # Ambil semua kata kunci
+            conditions = []
+            for keyword in keywords:
+                conditions.append(f"question_normalized LIKE '%{keyword}%'")
+            
+            where_clause = " OR ".join(conditions)
+            
+            query = f"""
+            SELECT answer, question_normalized, question
+            FROM `{TABLE_REF}`
+            WHERE {where_clause}
+            LIMIT 20
+            """
+            
+            query_job = bq_client.query(query)
+            results = list(query_job.result())
+            
+            if not results:
+                logger.info("Tidak ditemukan data yang mengandung kata kunci setelah normalisasi ketat")
+                return "Maaf, jawaban tidak ditemukan di database. Silakan coba dengan kata kunci yang lebih spesifik."
+            
+            # Hitung kemiripan untuk setiap hasil
+            best_match = None
+            best_score = 0
+            
+            for row in results:
+                # Normalisasi pertanyaan dari database
+                db_question_normalized = clean_text(row.question_normalized)
+                
+                # Hitung kemiripan
+                score = calculate_similarity(normalized_question, db_question_normalized)
+                
+                if score > best_score:
+                    best_score = score
+                    best_match = row.answer
+            
+            # Threshold untuk kemiripan
+            if best_match and best_score > 0.3:
+                logger.info(f"Ditemukan jawaban dengan skor kemiripan {best_score:.3f}: {best_match}")
+                return f"Pertanyaan: {question}\n\nJawaban: {best_match}"
+            else:
+                logger.info(f"Tidak ditemukan jawaban yang cukup mirip (best score: {best_score:.3f})")
+                return "Maaf, jawaban tidak ditemukan di database. Silakan coba dengan kata kunci yang lebih spesifik."
+                
+        except Exception as e:
+            logger.error(f"Error pada query kata kunci longgar: {e}")
+            return "Maaf, terjadi kesalahan saat mencari jawaban. Silakan coba lagi nanti."
+            
+    except Exception as e:
+        logger.error(f"Error menangani jawaban tidak ditemukan: {e}")
+        return "Maaf, terjadi kesalahan saat mencari jawaban. Silakan coba lagi nanti."
 
 # =======================
 # ⚙️ FUNGSI UTAMA
@@ -399,71 +519,8 @@ def find_answer_from_question(question: str) -> str:
         except Exception as e:
             logger.error(f"Error pada query exact match question: {e}")
         
-        # Langkah 3: Jika masih tidak ditemukan, cari dengan kemiripan kata kunci
-        try:
-            # Ekstrak kata kunci dari pertanyaan
-            keywords = get_keywords(question_normalized)
-            
-            if not keywords:
-                logger.warning("Tidak ada kata kunci yang ditemukan")
-                return "Jawaban tidak ditemukan di database. Coba gunakan kata kunci yang lebih spesifik."
-            
-            # Ambil 3 kata kunci terpanjang untuk filter
-            keywords.sort(key=len, reverse=True)
-            top_keywords = keywords[:3]
-            
-            # Buat query untuk mencari data yang mengandung kata kunci
-            conditions = []
-            for keyword in top_keywords:
-                conditions.append(f"question_normalized LIKE '%{keyword}%'")
-                conditions.append(f"question LIKE '%{keyword}%'")
-            
-            where_clause = " OR ".join(conditions)
-            
-            query = f"""
-            SELECT answer, question_normalized, question
-            FROM `{TABLE_REF}`
-            WHERE {where_clause}
-            LIMIT 100
-            """
-            
-            query_job = bq_client.query(query)
-            results = list(query_job.result())
-            
-            if not results:
-                logger.info("Tidak ditemukan data yang mengandung kata kunci")
-                return "Jawaban tidak ditemukan di database. Coba gunakan kata kunci yang lebih spesifik."
-            
-            # Hitung kemiripan untuk setiap hasil
-            best_match = None
-            best_score = 0
-            
-            for row in results:
-                # Hitung kemiripan dengan question_normalized
-                score_normalized = calculate_similarity(question_normalized, row.question_normalized)
-                
-                # Hitung kemiripan dengan question asli
-                score_original = calculate_similarity(question_normalized, row.question)
-                
-                # Ambil skor tertinggi
-                score = max(score_normalized, score_original)
-                
-                if score > best_score:
-                    best_score = score
-                    best_match = row.answer
-                    logger.debug(f"New best match: score={best_score:.3f}, answer={best_match[:50]}...")
-            
-            # Threshold untuk kemiripan
-            if best_match and best_score > 0.3:
-                logger.info(f"Ditemukan jawaban dengan skor kemiripan {best_score:.3f}: {best_match}")
-                return best_match
-            else:
-                logger.info(f"Tidak ditemukan jawaban yang cukup mirip (best score: {best_score:.3f})")
-                return "Jawaban tidak ditemukan di database. Coba gunakan kata kunci yang lebih spesifik."
-                
-        except Exception as e:
-            logger.error(f"Error pada query kemiripan: {e}")
-            return "Maaf, terjadi kesalahan saat mencari jawaban. Silakan coba lagi nanti."
+        # Langkah 3: Jika masih tidak ditemukan, gunakan fungsi handle_not_found_answer
+        return handle_not_found_answer(question)
             
     except Exception as e:
         logger.error(f"Error mencari jawaban: {str(e)}", exc_info=True)
