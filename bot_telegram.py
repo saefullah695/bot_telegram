@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # Konfigurasi BigQuery
 PROJECT_ID = os.getenv("PROJECT_ID", "prime-chess-472020-b6")
 DATASET_ID = os.getenv("DATASET_ID", "bot_telegram_gabung")
-TABLE_ID = os.getenv("TABLE_ID", "banksoal")
+TABLE_ID = os.getenv("TABLE_ID", "banksoal_claned")
 TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 
 # OCR.Space API Key
@@ -398,29 +398,6 @@ def find_answer_from_question(question: str) -> str:
                 return results[0].answer
         except Exception as e:
             logger.error(f"Error pada query exact match question: {e}")
-        
-        # Langkah 2.5: Jika tidak ditemukan exact match, cari dengan normalisasi input
-        # dan bandingkan dengan question_normalized di database
-        try:
-            # Normalisasi input pengguna (hapus tanda baca dan spasi berlebih)
-            user_input_normalized = normalize_question(question)
-            
-            # Cari semua question_normalized di database yang mungkin cocok
-            query = """
-            SELECT answer, question_normalized, question
-            FROM `{0}`
-            """.format(TABLE_REF)
-            
-            query_job = bq_client.query(query)
-            results = list(query_job.result())
-            
-            # Cari kecocokan antara input yang dinormalisasi dengan question_normalized di database
-            for row in results:
-                if user_input_normalized == row.question_normalized:
-                    logger.info(f"Ditemukan kecocokan setelah normalisasi: '{row.question}'")
-                    return row.answer
-        except Exception as e:
-            logger.error(f"Error pada query normalisasi input: {e}")
         
         # Langkah 3: Jika masih tidak ditemukan, cari dengan kemiripan kata kunci
         try:
