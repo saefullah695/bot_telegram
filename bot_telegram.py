@@ -6,7 +6,7 @@ import logging
 import datetime
 import csv
 import uuid
-import requests  # Tambahkan import requests untuk OCR.Space
+import requests
 from tempfile import NamedTemporaryFile
 from typing import List, Tuple
 from collections import Counter
@@ -124,7 +124,7 @@ def calculate_similarity(query: str, document: str) -> float:
     union = query_words.union(doc_words)
     
     # Jaccard similarity
-    return len(intion) / len(union) if union else 0
+    return len(intersection) / len(union) if union else 0
 
 # =======================
 # 🔍 FUNGSI OCR DENGAN FALLBACK
@@ -151,7 +151,7 @@ def ocr_with_ocrspace(image_content: bytes, filename: str = 'image.jpg') -> str:
         payload = {
             'isOverlayRequired': False,
             'apikey': OCR_SPACE_API_KEY,
-            'language': 'ind,eng',  # Prioritaskan Indonesia, lalu Inggris
+            'language': 'ind',  # Gunakan 'ind' untuk Indonesian (bukan 'id' atau 'ind,eng')
             'OCREngine': 2  # Gunakan engine 2 untuk akurasi lebih baik
         }
         
