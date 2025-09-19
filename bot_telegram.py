@@ -7,7 +7,7 @@ import datetime
 import csv
 import uuid
 from tempfile import NamedTemporaryFile
-from typing import List, Tuple, Dict
+from typing import List, Tuple
 from collections import Counter
 import math
 import requests
@@ -97,35 +97,6 @@ def normalize_question(question: str) -> str:
         logger.error(f"Error normalisasi pertanyaan: {e}")
         return question.lower().strip()
 
-def clean_multiple_choice_question(text: str) -> str:
-    """Membersihkan dan memformat ulang pertanyaan pilihan ganda dari hasil OCR"""
-    try:
-        # Pola untuk mendeteksi pertanyaan pilihan ganda
-        # Mencari pola: "dari [kata-kata] [opsi1] [opsi2] ..."
-        pattern = r'(dari\s+)(.*?)(?=\s*[A-Z][a-z]+\s+[A-Z][a-z]+|$)'
-        match = re.search(pattern, text, re.IGNORECASE)
-        
-        if match:
-            # Ambil bagian setelah kata "dari"
-            after_dari = text[match.end(1):]
-            
-            # Pisahkan opsi-opsi (asumsi opsi dimulai dengan huruf kapital)
-            options = re.findall(r'[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*', after_dari)
-            
-            if len(options) > 1:  # Jika ditemukan beberapa opsi
-                # Rekonstruksi pertanyaan dengan format yang benar
-                question_part = text[:match.start(1)] + "dari….: "
-                options_str = "; ".join(options)
-                cleaned_question = question_part + options_str
-                
-                logger.info(f"Reformatted multiple choice: '{text}' -> '{cleaned_question}'")
-                return cleaned_question
-        
-        return text
-    except Exception as e:
-        logger.error(f"Error cleaning multiple choice question: {e}")
-        return text
-
 def clean_ocr_text(text: str) -> str:
     """Membersihkan teks hasil OCR dari format tambahan seperti timestamp"""
     try:
@@ -133,13 +104,10 @@ def clean_ocr_text(text: str) -> str:
         cleaned = re.sub(r'^\d{1,2}:\d{2}\s*', '', text)
         
         # Hapus karakter khusus yang tidak perlu
-        cleaned = re.sub(r'[^\w\s\?\.\,\!\-\:;]', ' ', cleaned)
+        cleaned = re.sub(r'[^\w\s\?\.\,\!\-\:]', ' ', cleaned)
         
         # Hapus spasi berlebih
         cleaned = re.sub(r'\s+', ' ', cleaned)
-        
-        # Format ulang pertanyaan pilihan ganda
-        cleaned = clean_multiple_choice_question(cleaned)
         
         return cleaned.strip()
     except Exception as e:
@@ -192,136 +160,6 @@ def handle_short_questions(question: str) -> str:
     }
     
     return short_answers.get(question_lower, "")
-
-def handle_specific_patterns(question: str) -> str:
-    """Menangani pola pertanyaan spesifik yang sering muncul"""
-    try:
-        question_lower = question.lower()
-        
-        # Pola spesifik untuk pertanyaan tentang kursi dan sitting area
-        if "kursi" in question_lower and "sitting area" in question_lower:
-            return "Sitting Area"
-            
-        # Pola spesifik lainnya bisa ditambahkan di sini
-        
-        return ""
-    except Exception as e:
-        logger.error(f"Error handling specific patterns: {e}")
-        return ""
-
-def find_answer_by_pattern(question: str, options: List[str]) -> str:
-    """Mencari jawaban berdasarkan pola pertanyaan dan opsi yang tersedia"""
-    try:
-        if not options:
-            return ""
-        
-        # Cek dulu apakah ada pola spesifik yang cocok
-        specific_answer = handle_specific_patterns(question)
-        if specific_answer and specific_answer in options:
-            return specific_answer
-        
-        # Ekstrak kata kunci penting dari pertanyaan
-        keywords = get_keywords(question)
-        
-        # Fokus pada kata kunci yang paling relevan
-        important_keywords = []
-        for keyword in keywords:
-            if len(keyword) >= 4:  # Hanya kata dengan panjang minimal 4 karakter
-                important_keywords.append(keyword)
-        
-        if not important_keywords:
-            return ""
-        
-        # Cari di database berdasarkan kombinasi kata kunci
-        conditions = []
-        for keyword in important_keywords[:3]:  # Ambil maksimal 3 kata kunci
-            conditions.append(f"question_normalized LIKE '%{keyword}%'")
-            conditions.append(f"question LIKE '%{keyword}%'")
-        
-        where_clause = " OR ".join(conditions)
-        
-        query = f"""
-        SELECT answer, question_normalized, question
-        FROM `{TABLE_REF}`
-        WHERE {where_clause}
-        LIMIT 50
-        """
-        
-        query_job = bq_client.query(query)
-        results = list(query_job.result())
-        
-        if not results:
-            return ""
-        
-        # Hitung kemiripan dan berikan bonus untuk jawaban yang ada di opsi
-        best_match = None
-        best_score = 0
-        
-        for row in results:
-            # Hitung kemiripan dasar
-            score = calculate_similarity(" ".join(important_keywords), row.question_normalized)
-            
-            # Berikan bonus besar jika jawaban ada di opsi
-            if row.answer in options:
-                score += 0.3
-            
-            # Berikan bonus tambahan untuk kata kunci spesifik
-            if any(keyword in row.question_normalized.lower() for keyword in ['kursi', 'sitting', 'area']):
-                score += 0.1
-            
-            if score > best_score:
-                best_score = score
-                best_match = row.answer
-                logger.debug(f"New best match (pattern): score={best_score:.3f}, answer={best_match}")
-        
-        # Threshold yang lebih rendah untuk pertanyaan terpotong
-        if best_match and best_score > 0.1:
-            logger.info(f"Ditemukan jawaban dengan skor kemiripan (pattern) {best_score:.3f}: {best_match}")
-            return best_match
-        else:
-            logger.info(f"Tidak ditemukan jawaban yang cukup mirip (pattern) (best score: {best_score:.3f})")
-            return ""
-            
-    except Exception as e:
-        logger.error(f"Error pada query pattern: {e}")
-        return ""
-
-def generate_question_variations(question: str) -> List[str]:
-    """Menghasilkan variasi pertanyaan untuk pencarian yang lebih luas"""
-    variations = [question]
-    
-    try:
-        # Untuk pertanyaan pilihan ganda, buat variasi dengan menghilangkan bagian tengah
-        if "; " in question and "dari….: " in question:
-            # Pisahkan bagian awal dan opsi
-            parts = question.split("dari….: ")
-            if len(parts) == 2:
-                question_part = parts[0]
-                options_part = parts[1]
-                
-                # Variasi 1: Hanya bagian awal + opsi
-                variations.append(f"{question_part}dari….: {options_part}")
-                
-                # Variasi 2: Bagian awal yang lebih pendek + opsi
-                words = question_part.split()
-                if len(words) > 3:
-                    short_question = " ".join(words[:3]) + " dari….: "
-                    variations.append(f"{short_question}{options_part}")
-                
-                # Variasi 3: Hanya kata kunci penting + opsi
-                keywords = get_keywords(question_part)
-                if keywords:
-                    keyword_question = " ".join(keywords[:2]) + " dari….: "
-                    variations.append(f"{keyword_question}{options_part}")
-                
-                # Variasi 4: Untuk kasus spesifik kursi
-                if "kursi" in question_part.lower():
-                    variations.append(f"Kursi dalam keadaan lengkap, bersih dari….: {options_part}")
-    
-    except Exception as e:
-        logger.error(f"Error generating question variations: {e}")
-    
-    return variations
 
 # =======================
 # ⚙️ FUNGSI UTAMA
@@ -561,55 +399,7 @@ def find_answer_from_question(question: str) -> str:
         except Exception as e:
             logger.error(f"Error pada query exact match question: {e}")
         
-        # Langkah 3: Coba dengan variasi pertanyaan
-        try:
-            variations = generate_question_variations(question)
-            
-            for variation in variations:
-                if variation != question:  # Skip pertanyaan asli
-                    variation_normalized = normalize_question(variation)
-                    
-                    # Cari exact match untuk variasi
-                    query = """
-                    SELECT answer 
-                    FROM `{0}` 
-                    WHERE question_normalized = @question_normalized
-                    LIMIT 1
-                    """.format(TABLE_REF)
-                    
-                    job_config = bigquery.QueryJobConfig(
-                        query_parameters=[
-                            bigquery.ScalarQueryParameter("question_normalized", "STRING", variation_normalized)
-                        ]
-                    )
-                    
-                    query_job = bq_client.query(query, job_config=job_config)
-                    results = list(query_job.result())
-                    
-                    if results:
-                        logger.info(f"Ditemukan exact match untuk variasi: '{variation}'")
-                        return results[0].answer
-        except Exception as e:
-            logger.error(f"Error pada query variasi: {e}")
-        
-        # Langkah 4: Jika masih tidak ditemukan, coba pendekatan khusus untuk pertanyaan pilihan ganda
-        try:
-            # Cek apakah pertanyaan mengandung opsi pilihan ganda
-            if "; " in question:
-                # Pisahkan pertanyaan dan opsi
-                parts = question.split("; ")
-                if len(parts) > 1:
-                    # Ekstrak opsi-opsi
-                    options = [opt.strip() for opt in parts[1:]]
-                    
-                    # Cari jawaban berdasarkan pola pertanyaan dan opsi
-                    pattern_answer = find_answer_by_pattern(parts[0], options)
-                    if pattern_answer:
-                        return pattern_answer
-        except Exception as e:
-            logger.error(f"Error pada pendekatan pilihan ganda: {e}")
-        
-        # Langkah 5: Jika masih tidak ditemukan, cari dengan kemiripan kata kunci
+        # Langkah 3: Jika masih tidak ditemukan, cari dengan kemiripan kata kunci
         try:
             # Ekstrak kata kunci dari pertanyaan
             keywords = get_keywords(question_normalized)
@@ -785,32 +575,7 @@ async def tambah_soal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         question, answer = parts[0].strip(), parts[1].strip()
         
-        # Simpan pertanyaan asli
-        success1 = simpan_soal(question, answer, f"telegram_{user.id}")
-        
-        # Jika ini pertanyaan pilihan ganda, simpan juga variasinya
-        success2 = False
-        if "; " in question and "dari….: " in question:
-            # Buat variasi dengan bagian yang lebih pendek
-            parts_question = question.split("dari….: ")
-            if len(parts_question) == 2:
-                question_part = parts_question[0]
-                options_part = parts_question[1]
-                
-                # Variasi dengan bagian awal yang lebih pendek
-                words = question_part.split()
-                if len(words) > 3:
-                    short_question = " ".join(words[:3]) + " dari….: "
-                    variation = f"{short_question}{options_part}"
-                    success2 = simpan_soal(variation, answer, f"telegram_{user.id}_variation")
-                
-                # Variasi khusus untuk kasus kursi
-                if "kursi" in question_part.lower():
-                    special_variation = f"Kursi dalam keadaan lengkap, bersih dari….: {options_part}"
-                    success3 = simpan_soal(special_variation, answer, f"telegram_{user.id}_special")
-                    success2 = success2 or success3
-        
-        if success1 or success2:
+        if simpan_soal(question, answer, f"telegram_{user.id}"):
             await update.message.reply_text("Soal dan jawaban berhasil ditambahkan!")
         else:
             await update.message.reply_text("Gagal menambahkan soal. Mungkin soal sudah ada di database.")
