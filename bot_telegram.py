@@ -193,6 +193,68 @@ def handle_short_questions(question: str) -> str:
     
     return short_answers.get(question_lower, "")
 
+def find_answer_by_keywords(keywords: List[str], options: List[str]) -> str:
+    """Mencari jawaban berdasarkan kata kunci dan opsi yang tersedia"""
+    try:
+        if not keywords or not options:
+            return ""
+        
+        # Buat query untuk mencari data yang mengandung kata kunci
+        conditions = []
+        for keyword in keywords:
+            conditions.append(f"question_normalized LIKE '%{keyword}%'")
+            conditions.append(f"question LIKE '%{keyword}%'")
+        
+        where_clause = " OR ".join(conditions)
+        
+        query = f"""
+        SELECT answer, question_normalized, question
+        FROM `{TABLE_REF}`
+        WHERE {where_clause}
+        LIMIT 100
+        """
+        
+        query_job = bq_client.query(query)
+        results = list(query_job.result())
+        
+        if not results:
+            return ""
+        
+        # Hitung kemiripan untuk setiap hasil
+        best_match = None
+        best_score = 0
+        
+        for row in results:
+            # Hitung kemiripan dengan question_normalized
+            score_normalized = calculate_similarity(" ".join(keywords), row.question_normalized)
+            
+            # Hitung kemiripan dengan question asli
+            score_original = calculate_similarity(" ".join(keywords), row.question)
+            
+            # Ambil skor tertinggi
+            score = max(score_normalized, score_original)
+            
+            # Bonus jika jawaban ada di opsi
+            if row.answer in options:
+                score += 0.1
+            
+            if score > best_score:
+                best_score = score
+                best_match = row.answer
+                logger.debug(f"New best match (keywords): score={best_score:.3f}, answer={best_match}")
+        
+        # Threshold untuk kemiripan
+        if best_match and best_score > 0.2:
+            logger.info(f"Ditemukan jawaban dengan skor kemiripan (keywords) {best_score:.3f}: {best_match}")
+            return best_match
+        else:
+            logger.info(f"Tidak ditemukan jawaban yang cukup mirip (keywords) (best score: {best_score:.3f})")
+            return ""
+            
+    except Exception as e:
+        logger.error(f"Error pada query keywords: {e}")
+        return ""
+
 # =======================
 # ⚙️ FUNGSI UTAMA
 # =======================
@@ -431,7 +493,28 @@ def find_answer_from_question(question: str) -> str:
         except Exception as e:
             logger.error(f"Error pada query exact match question: {e}")
         
-        # Langkah 3: Jika masih tidak ditemukan, cari dengan kemiripan kata kunci
+        # Langkah 3: Jika masih tidak ditemukan, coba pendekatan khusus untuk pertanyaan pilihan ganda
+        try:
+            # Cek apakah pertanyaan mengandung opsi pilihan ganda
+            if "; " in question:
+                # Pisahkan pertanyaan dan opsi
+                parts = question.split("; ")
+                if len(parts) > 1:
+                    # Ekstrak opsi-opsi
+                    options = [opt.strip() for opt in parts[1:]]
+                    
+                    # Ekstrak kata kunci dari bagian pertama pertanyaan
+                    question_part = parts[0].split("dari….:")[0].strip()
+                    keywords = get_keywords(question_part)
+                    
+                    # Cari jawaban berdasarkan kata kunci dan opsi
+                    keyword_answer = find_answer_by_keywords(keywords, options)
+                    if keyword_answer:
+                        return keyword_answer
+        except Exception as e:
+            logger.error(f"Error pada pendekatan pilihan ganda: {e}")
+        
+        # Langkah 4: Jika masih tidak ditemukan, cari dengan kemiripan kata kunci
         try:
             # Ekstrak kata kunci dari pertanyaan
             keywords = get_keywords(question_normalized)
