@@ -6,11 +6,11 @@ import logging
 import datetime
 import csv
 import uuid
-import requests
 from tempfile import NamedTemporaryFile
 from typing import List, Tuple
 from collections import Counter
 import math
+import requests  # Tambahkan import requests
 
 from google.cloud import bigquery
 from google.cloud import vision
@@ -31,6 +31,9 @@ DATASET_ID = os.getenv("DATASET_ID", "bot_telegram_gabung")
 TABLE_ID = os.getenv("TABLE_ID", "banksoal")
 TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 
+# OCR.Space API Key
+OCR_SPACE_API_KEY = "K84451990188957"
+
 # Global clients
 bq_client = None
 vision_client = None
@@ -43,10 +46,6 @@ STOPWORDS = {
     'dapat', 'lebih', 'sudah', 'belum', 'bisa', 'dapat', 'yaitu', 'yakni',
     'adalah', 'ialah', 'merupakan', 'tersebut', 'tersebutlah'
 }
-
-# Konfigurasi OCR.Space
-OCR_SPACE_API_KEY = "K84451990188957"  # API key OCR.Space
-OCR_SPACE_URL = "https://api.ocr.space/parse/image"
 
 # =======================
 # 🔑 SETUP BIGQUERY & GOOGLE VISION
@@ -125,83 +124,6 @@ def calculate_similarity(query: str, document: str) -> float:
     
     # Jaccard similarity
     return len(intersection) / len(union) if union else 0
-
-# =======================
-# 🔍 FUNGSI OCR DENGAN FALLBACK
-# =======================
-
-def ocr_with_google_vision(image_content: bytes) -> str:
-    """Melakukan OCR pada gambar menggunakan Google Cloud Vision API"""
-    try:
-        image = vision.Image(content=image_content)
-        response = vision_client.document_text_detection(image=image)
-        
-        if response.error.message:
-            logger.error(f"Error OCR Google Vision: {response.error.message}")
-            return ""
-        
-        return response.text_annotations[0].text if response.text_annotations else ""
-    except Exception as e:
-        logger.error(f"Error dalam OCR Google Vision: {e}")
-        return ""
-
-def ocr_with_ocrspace(image_content: bytes, filename: str = 'image.jpg') -> str:
-    """Melakukan OCR menggunakan OCR.Space API sebagai fallback"""
-    try:
-        payload = {
-            'isOverlayRequired': False,
-            'apikey': OCR_SPACE_API_KEY,
-            'language': 'ind',  # Gunakan 'ind' untuk Indonesian (bukan 'id' atau 'ind,eng')
-            'OCREngine': 2  # Gunakan engine 2 untuk akurasi lebih baik
-        }
-        
-        files = {'image': (filename, image_content, 'image/jpeg')}
-        
-        response = requests.post(
-            OCR_SPACE_URL,
-            files=files,
-            data=payload,
-            timeout=30
-        )
-        response.raise_for_status()
-        
-        result = response.json()
-        
-        # Periksa jika OCR berhasil
-        if result.get('IsErroredOnProcessing', False):
-            error_message = result.get('ErrorMessage', 'Unknown error from OCR.Space')
-            logger.error(f"OCR.Space error: {error_message}")
-            return ""
-        
-        # Ekstrak teks dari hasil
-        parsed_results = result.get('ParsedResults', [])
-        if parsed_results:
-            parsed_text = parsed_results[0].get('ParsedText', '').strip()
-            if parsed_text:
-                logger.info("OCR.Space berhasil mengekstrak teks")
-                return parsed_text
-        
-        logger.warning("OCR.Space tidak mengembalikan teks yang valid")
-        return ""
-        
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error koneksi ke OCR.Space: {e}")
-        return ""
-    except Exception as e:
-        logger.error(f"Error tidak terduga dalam OCR.Space: {e}")
-        return ""
-
-def perform_ocr(image_content: bytes) -> str:
-    """Melakukan OCR dengan fallback dari Google Vision ke OCR.Space"""
-    # Coba Google Vision terlebih dahulu
-    ocr_text = ocr_with_google_vision(image_content)
-    
-    # Jika Google Vision gagal atau tidak mendapatkan teks, coba OCR.Space
-    if not ocr_text or len(ocr_text.strip()) < 5:  # Minimal 5 karakter
-        logger.info("Google Vision gagal atau teks terlalu pendek, mencoba OCR.Space...")
-        ocr_text = ocr_with_ocrspace(image_content)
-    
-    return ocr_text or ""
 
 # =======================
 # ⚙️ FUNGSI UTAMA
@@ -285,6 +207,68 @@ def parse_qa_text(text: str) -> List[Tuple[str, str]]:
         logger.error(f"Error parsing teks: {e}")
     
     return questions_answers
+
+def ocr_with_google_vision(image_content: bytes) -> str:
+    """Melakukan OCR pada gambar menggunakan Google Cloud Vision API"""
+    try:
+        image = vision.Image(content=image_content)
+        response = vision_client.document_text_detection(image=image)
+        
+        if response.error.message:
+            logger.error(f"Error OCR: {response.error.message}")
+            return ""
+        
+        return response.text_annotations[0].text if response.text_annotations else ""
+    except Exception as e:
+        logger.error(f"Error dalam OCR: {e}")
+        return ""
+
+def ocr_with_ocr_space(image_content: bytes) -> str:
+    """Melakukan OCR pada gambar menggunakan OCR.Space API sebagai fallback"""
+    try:
+        # Buat file temporary untuk gambar
+        with NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
+            temp_file.write(image_content)
+            temp_file_path = temp_file.name
+        
+        # Siapkan payload untuk OCR.Space
+        payload = {
+            'isOverlayRequired': False,
+            'apikey': OCR_SPACE_API_KEY,
+            'language': 'eng',  # Bisa diganti ke 'ind' untuk Bahasa Indonesia
+        }
+        
+        # Siapkan file untuk diupload
+        with open(temp_file_path, 'rb') as f:
+            files = {
+                'file': (temp_file_path, f, 'image/jpeg')
+            }
+            
+            # Kirim request ke OCR.Space
+            response = requests.post(
+                'https://api.ocr.space/parse/image',
+                files=files,
+                data=payload
+            )
+        
+        # Hapus file temporary
+        os.unlink(temp_file_path)
+        
+        # Parse response
+        result = response.json()
+        
+        if result.get('OCRExitCode') == 1:  # Sukses
+            parsed_results = result.get('ParsedResults', [])
+            if parsed_results:
+                return parsed_results[0].get('ParsedText', '')
+        else:
+            logger.error(f"OCR.Space error: {result.get('ErrorMessage', 'Unknown error')}")
+            return ""
+            
+        return ""
+    except Exception as e:
+        logger.error(f"Error dalam OCR.Space: {e}")
+        return ""
 
 def find_question_answer_columns(headers: List[str]) -> Tuple[List[int], List[int]]:
     """Mencari indeks kolom yang mengandung 'question' dan 'answer' dalam header"""
@@ -599,24 +583,31 @@ async def cari_jawaban_gambar(update: Update, context: ContextTypes.DEFAULT_TYPE
         file = await context.bot.get_file(file_id)
         file_bytes = await file.download_as_bytearray()
         
-        # Lakukan OCR dengan fallback mechanism
-        ocr_text = perform_ocr(bytes(file_bytes))
+        # Lakukan OCR dengan Google Vision terlebih dahulu
+        ocr_text = ocr_with_google_vision(bytes(file_bytes))
         
-        if not ocr_text or len(ocr_text.strip()) < 5:  # Minimal 5 karakter
-            await update.message.reply_text("Tidak dapat membaca teks dari gambar. Pastikan gambar jelas dan berisi teks yang cukup.")
+        # Jika Google Vision gagal, gunakan OCR.Space sebagai fallback
+        if not ocr_text:
+            logger.info("Google Vision gagal, mencoba OCR.Space sebagai fallback")
+            ocr_text = ocr_with_ocr_space(bytes(file_bytes))
+            
+            # Jika OCR.Space juga gagal
+            if not ocr_text:
+                await update.message.reply_text("Tidak dapat membaca teks dari gambar. Pastikan gambar jelas dan berisi teks.")
+                return
+            else:
+                logger.info("OCR.Space berhasil sebagai fallback")
+        
+        # Validasi panjang teks hasil OCR
+        if len(ocr_text.strip()) < 2:
+            await update.message.reply_text("Teks yang terdeteksi terlalu pendek. Pastikan gambar berisi pertanyaan yang jelas.")
             return
         
         # Cari jawaban berdasarkan teks hasil OCR
         answer = find_answer_from_question(ocr_text)
         
         # Kirim hasil
-        response_text = f"Teks terdeteksi: {ocr_text}\n\nJawaban: {answer}"
-        
-        # Potong teks jika terlalu panjang untuk Telegram
-        if len(response_text) > 4000:
-            response_text = response_text[:4000] + "..."
-            
-        await update.message.reply_text(response_text)
+        await update.message.reply_text(f"Teks terdeteksi: {ocr_text}\n\nJawaban: {answer}")
         
     except Exception as e:
         logger.error(f"Error mencari jawaban gambar: {e}", exc_info=True)
@@ -641,17 +632,21 @@ async def ocr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(file_id)
         file_bytes = await file.download_as_bytearray()
         
-        # Lakukan OCR dengan fallback mechanism
-        ocr_text = perform_ocr(bytes(file_bytes))
+        # Lakukan OCR dengan Google Vision terlebih dahulu
+        ocr_text = ocr_with_google_vision(bytes(file_bytes))
         
+        # Jika Google Vision gagal, gunakan OCR.Space sebagai fallback
         if not ocr_text:
-            await update.message.reply_text("Tidak dapat membaca teks dari gambar.")
-            return
-        
-        # Potong teks jika terlalu panjang untuk Telegram
-        if len(ocr_text) > 4000:
-            ocr_text = ocr_text[:4000] + "..."
+            logger.info("Google Vision gagal, mencoba OCR.Space sebagai fallback")
+            ocr_text = ocr_with_ocr_space(bytes(file_bytes))
             
+            # Jika OCR.Space juga gagal
+            if not ocr_text:
+                await update.message.reply_text("Tidak dapat membaca teks dari gambar.")
+                return
+            else:
+                logger.info("OCR.Space berhasil sebagai fallback")
+        
         await update.message.reply_text(f"Hasil OCR:\n\n{ocr_text}")
         
     except Exception as e:
