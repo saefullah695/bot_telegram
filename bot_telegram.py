@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # Konfigurasi BigQuery
 PROJECT_ID = os.getenv("PROJECT_ID", "prime-chess-472020-b6")
 DATASET_ID = os.getenv("DATASET_ID", "Data")
-TABLE_ID = os.getenv("TABLE_ID", "mtk")
+TABLE_ID = os.getenv("TABLE_ID", "Telegram-new")
 TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 
 # OCR.Space API Key
@@ -119,7 +119,7 @@ def clean_text(text: str) -> str:
         return str(text).strip() if text else ""
 
 def normalize_for_search(text: str) -> str:
-    """Normalisasi sesuai dengan format data di database (memertahankan simbol matematika)"""
+    """Normalisasi sesuai dengan format data di database (tanpa tanda baca dan spasi tunggal)"""
     try:
         text = clean_text(text)
         if not text:
@@ -140,9 +140,8 @@ def normalize_for_search(text: str) -> str:
         for old, new in replacements.items():
             text = re.sub(rf'\b{old}\b', new, text)
         
-        # Modifikasi: Hanya hapus karakter yang bukan huruf, angka, spasi, atau simbol matematika
-        # Simbol matematika yang dipertahankan: + - * / = ( ) [ ] { } < > ^ %
-        text = re.sub(r'[^\w\s\+\-\*\/\=\(\)\[\]\{\}\<\>\^\%]', ' ', text)
+        # Hapus SEMUA tanda baca untuk menyesuaikan dengan format database
+        text = re.sub(r'[^\w\s]', ' ', text)
         
         # Normalisasi spasi menjadi spasi tunggal
         text = re.sub(r'\s+', ' ', text).strip()
@@ -159,19 +158,17 @@ def extract_keywords(text: str) -> List[str]:
         if not normalized:
             return []
         
-        # Modifikasi: Pisahkan dengan mempertahankan simbol matematika
-        words = re.findall(r'[a-zA-Z0-9]+|[+\-*/=(){}\[\]<>^%]', normalized)
+        words = normalized.split()
         keywords = []
         
         for word in words:
+            word = word.strip('.,!?-')
+            
             # Pertahankan kata penting meskipun pendek
             if word in IMPORTANT_WORDS:
                 keywords.append(word)
             # Pertahankan kata yang cukup panjang dan bukan stopword
             elif len(word) >= 2 and word not in STOPWORDS:
-                keywords.append(word)
-            # Pertahankan simbol matematika
-            elif word in '+-*/=(){}[]<>^%':
                 keywords.append(word)
         
         return keywords
@@ -180,9 +177,9 @@ def extract_keywords(text: str) -> List[str]:
         return []
 
 def calculate_text_similarity(text1: str, text2: str) -> float:
-    """Hitung similarity untuk teks dengan simbol matematika"""
+    """Hitung similarity untuk teks tanpa tanda baca (sesuai format database)"""
     try:
-        # Kedua teks sudah dalam format normalized (dengan simbol matematika)
+        # Kedua teks sudah dalam format normalized (tanpa tanda baca)
         if not text1 or not text2:
             return 0.0
         
@@ -193,28 +190,28 @@ def calculate_text_similarity(text1: str, text2: str) -> float:
         # 2. Sequence similarity untuk keseluruhan
         seq_similarity = SequenceMatcher(None, text1, text2).ratio()
         
-        # 3. Token-level similarity (dengan simbol matematika)
-        tokens1 = re.findall(r'[a-zA-Z0-9]+|[+\-*/=(){}\[\]<>^%]', text1)
-        tokens2 = re.findall(r'[a-zA-Z0-9]+|[+\-*/=(){}\[\]<>^%]', text2)
+        # 3. Word-level similarity
+        words1 = text1.split()
+        words2 = text2.split()
         
-        if not tokens1 or not tokens2:
+        if not words1 or not words2:
             return seq_similarity * 0.3
         
-        # Hitung token overlap
-        set1, set2 = set(tokens1), set(tokens2)
+        # Hitung word overlap
+        set1, set2 = set(words1), set(words2)
         intersection = len(set1 & set2)
         union = len(set1 | set2)
-        token_similarity = intersection / union if union > 0 else 0.0
+        word_similarity = intersection / union if union > 0 else 0.0
         
         # 4. Length similarity (penalti untuk perbedaan panjang yang ekstrem)
-        len_ratio = min(len(tokens1), len(tokens2)) / max(len(tokens1), len(tokens2))
+        len_ratio = min(len(words1), len(words2)) / max(len(words1), len(words2))
         
         # 5. Important word bonus
         important_matches = (set1 & set2) & {word.replace(',', '').replace('.', '') for word in IMPORTANT_WORDS}
         important_bonus = len(important_matches) * 0.15
         
         # Weighted combination
-        final_score = (seq_similarity * 0.2) + (token_similarity * 0.6) + (len_ratio * 0.2) + important_bonus
+        final_score = (seq_similarity * 0.2) + (word_similarity * 0.6) + (len_ratio * 0.2) + important_bonus
         
         return min(final_score, 1.0)
     except Exception as e:
@@ -1108,6 +1105,7 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error di /debug: {e}")
         await update.message.reply_text("Terjadi error saat debugging.")
 
+# Tambahkan handler debug ke main function
 def main():
     """Fungsi utama untuk menjalankan bot"""
     try:
@@ -1129,7 +1127,7 @@ def main():
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("tambah", tambah_soal))
         application.add_handler(CommandHandler("ocr", ocr_command))
-        application.add_handler(CommandHandler("debug", debug_command))
+        application.add_handler(CommandHandler("debug", debug_command))  # Tambah debug handler
         
         # Message handlers - urutan penting!
         application.add_handler(MessageHandler(
@@ -1167,3 +1165,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
