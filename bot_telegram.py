@@ -92,9 +92,10 @@ def normalize_text(text: str) -> str:
         normalized = unicodedata.normalize('NFKD', text)
         
         # Hapus semua tanda baca termasuk karakter khusus seperti ..., :, dll.
+        # Pola ini menghapus semua karakter non-alfanumerik kecuali spasi
         normalized = re.sub(r'[^\w\s]', ' ', normalized)
         
-        # Hapus spasi berlebih
+        # Hapus spasi berlebih (ganti multiple spasi dengan satu spasi)
         normalized = re.sub(r'\s+', ' ', normalized)
         
         # Ubah ke lowercase
@@ -364,6 +365,7 @@ def find_answer_from_question(question: str) -> str:
         
         # Normalisasi pertanyaan (hapus semua tanda baca dan spasi berlebih)
         question_normalized = normalize_text(question)
+        logger.info(f"Pertanyaan setelah normalisasi: '{question_normalized}'")
         
         # Cek dulu apakah pertanyaan termasuk pertanyaan singkat
         short_answer = handle_short_questions(question_normalized)
@@ -405,6 +407,7 @@ def find_answer_from_question(question: str) -> str:
         try:
             # Normalisasi alternatif: hapus semua karakter non-alfanumerik termasuk spasi
             alt_normalized = re.sub(r'[^a-zA-Z0-9]', '', question_normalized)
+            logger.info(f"Normalisasi alternatif: '{alt_normalized}'")
             
             query = """
             SELECT answer, question_normalized
@@ -434,6 +437,8 @@ def find_answer_from_question(question: str) -> str:
             words = question_normalized.split()
             if not words:
                 raise ValueError("No words found after normalization")
+            
+            logger.info(f"Kata kunci untuk pencarian fuzzy: {words}")
             
             # Buat kondisi LIKE untuk setiap kata
             conditions = []
