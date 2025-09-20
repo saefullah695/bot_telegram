@@ -5,7 +5,7 @@ pip install --no-cache-dir -r requirements.txt
 """
 
 [deploy]
-startCommand = "python bot.py"
+startCommand = "python bot_telegram.py"
 
 [env]
 PYTHON_VERSION = "3.9"
