@@ -454,7 +454,64 @@ def find_answer_from_question(question: str) -> str:
         except Exception as e:
             logger.error(f"Error pada query normalisasi agresif: {e}")
         
-        # Langkah 4: Jika masih tidak ditemukan, cari dengan kemiripan kata kunci
+        # Langkah 4: Pencarian dengan kata kunci dari normalisasi agresif
+        try:
+            # Buat versi normalisasi yang sangat agresif (tanpa tanda baca sama sekali)
+            very_aggressive_normalized = re.sub(r'[^\w\s]', ' ', question_normalized)
+            very_aggressive_normalized = re.sub(r'\s+', ' ', very_aggressive_normalized).strip()
+            
+            # Ambil kata-kata kunci
+            words = very_aggressive_normalized.split()
+            if not words:
+                raise ValueError("No words found after aggressive normalization")
+            
+            # Buat kondisi LIKE untuk setiap kata
+            conditions = []
+            for word in words:
+                if len(word) > 2:  # Abaikan kata yang terlalu pendek
+                    conditions.append(f"question_normalized LIKE '%{word}%'")
+            
+            if not conditions:
+                raise ValueError("No valid conditions for aggressive search")
+            
+            where_clause = " AND ".join(conditions)
+            
+            query = f"""
+            SELECT answer, question_normalized, question
+            FROM `{TABLE_REF}`
+            WHERE {where_clause}
+            LIMIT 10
+            """
+            
+            query_job = bq_client.query(query)
+            results = list(query_job.result())
+            
+            if results:
+                # Hitung kemiripan untuk setiap hasil
+                best_match = None
+                best_score = 0
+                
+                for row in results:
+                    # Normalisasi agresif untuk data di database
+                    db_aggressive = re.sub(r'[^\w\s]', ' ', row.question_normalized)
+                    db_aggressive = re.sub(r'\s+', ' ', db_aggressive).strip()
+                    
+                    # Hitung kemiripan
+                    score = calculate_similarity(very_aggressive_normalized, db_aggressive)
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_match = row.answer
+                        logger.debug(f"New best match (aggressive): score={best_score:.3f}, answer={best_match[:50]}...")
+                
+                # Threshold untuk kemiripan
+                if best_match and best_score > 0.8:  # Threshold tinggi karena ini perbandingan string yang sudah dinormalisasi
+                    logger.info(f"Ditemukan jawaban dengan pencarian agresif, skor {best_score:.3f}: {best_match}")
+                    return best_match
+        except Exception as e:
+            logger.error(f"Error pada query pencarian agresif: {e}")
+        
+        # Langkah 5: Jika masih tidak ditemukan, cari dengan kemiripan kata kunci
         try:
             # Ekstrak kata kunci dari pertanyaan
             keywords = get_keywords(question_normalized)
