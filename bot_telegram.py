@@ -7,22 +7,17 @@ import datetime
 import csv
 import uuid
 from tempfile import NamedTemporaryFile
-from typing import List, Tuple, Dict
+from typing import List, Tuple
 from collections import Counter
 import math
 import requests
 import unicodedata
-import numpy as np
 
 from google.cloud import bigquery
 from google.cloud import vision
 from google.cloud.vision import ImageAnnotatorClient
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-
-# Untuk TF-IDF dan similarity
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 
 # Setup logging dengan format yang lebih detail
 logging.basicConfig(
@@ -36,22 +31,9 @@ PROJECT_ID = os.getenv("PROJECT_ID", "prime-chess-472020-b6")
 DATASET_ID = os.getenv("DATASET_ID", "Data")
 TABLE_ID = os.getenv("TABLE_ID", "Telegram-new")
 TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
-INDEX_TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.search_index"
 
 # OCR.Space API Key
 OCR_SPACE_API_KEY = "K84451990188957"
-
-# Konfigurasi similarity method
-SIMILARITY_THRESHOLD = 0.5  # Threshold untuk kemiripan
-
-# Batasan ukuran file (dalam bytes)
-MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5MB
-MAX_DOCUMENT_SIZE = 20 * 1024 * 1024  # 20MB
-MAX_CSV_SIZE = 10 * 1024 * 1024  # 10MB
-
-# Dimensi gambar maksimum
-MAX_IMAGE_WIDTH = 2000
-MAX_IMAGE_HEIGHT = 2000
 
 # Global clients
 bq_client = None
@@ -65,11 +47,6 @@ STOPWORDS = {
     'dapat', 'lebih', 'sudah', 'belum', 'bisa', 'dapat', 'yaitu', 'yakni',
     'adalah', 'ialah', 'merupakan', 'tersebut', 'tersebutlah'
 }
-
-# Global variables for similarity calculation
-tfidf_vectorizer = None
-document_cache = {}
-document_vectors = None
 
 # =======================
 # 🔑 SETUP BIGQUERY & GOOGLE VISION
@@ -102,102 +79,11 @@ def initialize_services():
             logger.info(f"Test koneksi BigQuery berhasil. Jumlah data: {results[0].count}")
         except Exception as e:
             logger.error(f"Test koneksi BigQuery gagal: {e}")
-        
-        # Initialize similarity components
-        initialize_similarity_components()
-        
+            
         return bq_client, vision_client
     except Exception as e:
         logger.error(f"Gagal menginisialisasi services: {e}")
         raise
-
-def initialize_similarity_components():
-    """Inisialisasi komponen untuk perhitungan similarity"""
-    global tfidf_vectorizer, document_cache, document_vectors
-    
-    try:
-        # Initialize TF-IDF Vectorizer
-        tfidf_vectorizer = TfidfVectorizer(
-            tokenizer=lambda text: get_keywords(text),
-            lowercase=True,
-            stop_words=list(STOPWORDS)
-        )
-        logger.info("TF-IDF Vectorizer initialized")
-        
-        # Update document cache and vectors
-        update_document_cache()
-        
-        # Create search index
-        create_search_index()
-        
-    except Exception as e:
-        logger.error(f"Error initializing similarity components: {e}")
-
-def update_document_cache():
-    """Update cache dokumen dari BigQuery untuk perhitungan similarity"""
-    global document_cache, document_vectors
-    
-    try:
-        query = f"SELECT id, question_normalized FROM `{TABLE_REF}`"
-        query_job = bq_client.query(query)
-        results = list(query_job.result())
-        
-        # Reset cache
-        document_cache = {row.id: row.question_normalized for row in results}
-        
-        # Update TF-IDF matrix
-        if document_cache and tfidf_vectorizer:
-            documents = list(document_cache.values())
-            document_vectors = tfidf_vectorizer.fit_transform(documents)
-            
-        logger.info(f"Updated document cache with {len(document_cache)} documents")
-        return True
-    except Exception as e:
-        logger.error(f"Error updating document cache: {e}")
-        return False
-
-def create_search_index():
-    """Membuat search index di BigQuery untuk meningkatkan performa pencarian"""
-    try:
-        # Hapus tabel jika sudah ada
-        bq_client.query(f"DROP TABLE IF EXISTS `{INDEX_TABLE_REF}`").result()
-        
-        # Buat tabel index
-        create_table_query = f"""
-        CREATE TABLE `{INDEX_TABLE_REF}` (
-            id STRING,
-            word STRING,
-            position INT64
-        )
-        """
-        
-        bq_client.query(create_table_query).result()
-        logger.info("Created search index table")
-        
-        # Isi tabel index dengan data dari tabel utama
-        populate_query = f"""
-        INSERT INTO `{INDEX_TABLE_REF}`
-        SELECT 
-            id,
-            word,
-            pos
-        FROM (
-            SELECT 
-                id,
-                SPLIT(question_normalized, ' ') AS words,
-                GENERATE_ARRAY(1, ARRAY_LENGTH(SPLIT(question_normalized, ' '))) AS positions
-            FROM `{TABLE_REF}`
-        ), UNNEST(words) AS word WITH OFFSET AS pos
-        WHERE LENGTH(word) > 2
-        """
-        
-        bq_client.query(populate_query).result()
-        logger.info("Populated search index table")
-        
-        return True
-    except Exception as e:
-        logger.error(f"Error creating search index: {e}")
-        return False
 
 def normalize_text(text: str) -> str:
     """Normalisasi teks: hapus semua tanda baca dan spasi berlebih"""
@@ -254,214 +140,26 @@ def get_keywords(text: str) -> List[str]:
     
     return keywords
 
-def calculate_similarity_tfidf(query: str, document: str) -> float:
-    """Hitung kemiripan menggunakan cosine similarity dengan TF-IDF"""
-    try:
-        if tfidf_vectorizer is None or document_vectors is None:
-            logger.warning("TF-IDF components not initialized")
-            return 0.0
-        
-        # Normalisasi query
-        normalized_query = normalize_text(query)
-        
-        # Transform query ke TF-IDF
-        query_vector = tfidf_vectorizer.transform([normalized_query])
-        
-        # Transform document ke TF-IDF
-        doc_vector = tfidf_vectorizer.transform([document])
-        
-        # Hitung cosine similarity
-        similarity = cosine_similarity(query_vector, doc_vector)[0][0]
-        
-        return float(similarity)
-    except Exception as e:
-        logger.error(f"Error calculating TF-IDF similarity: {e}")
+def calculate_similarity(query: str, document: str) -> float:
+    """Hitung kemiripan sederhana antara query dan document"""
+    # Normalisasi keduanya sebelum perbandingan
+    normalized_query = normalize_text(query)
+    normalized_document = normalize_text(document)
+    
+    query_words = set(get_keywords(normalized_query))
+    doc_words = set(get_keywords(normalized_document))
+    
+    if not query_words or not doc_words:
         return 0.0
-
-def cosine_similarity_text(text1: str, text2: str) -> float:
-    """Hitung cosine similarity antara dua teks dengan implementasi sederhana"""
-    try:
-        # Get word vectors
-        words1 = get_keywords(text1)
-        words2 = get_keywords(text2)
-        
-        # Create word frequency vectors
-        word_set = set(words1).union(set(words2))
-        vec1 = [words1.count(word) for word in word_set]
-        vec2 = [words2.count(word) for word in word_set]
-        
-        # Calculate dot product
-        dot_product = sum(a * b for a, b in zip(vec1, vec2))
-        
-        # Calculate magnitudes
-        mag1 = math.sqrt(sum(a * a for a in vec1))
-        mag2 = math.sqrt(sum(a * a for a in vec2))
-        
-        # Calculate cosine similarity
-        if mag1 == 0 or mag2 == 0:
-            return 0.0
-        return dot_product / (mag1 * mag2)
-    except Exception as e:
-        logger.error(f"Error calculating cosine similarity: {e}")
-        return 0.0
-
-def find_best_matches_tfidf(query: str, top_n: int = 5) -> List[Tuple[str, str, float]]:
-    """Cari dokumen paling mirip menggunakan TF-IDF"""
-    try:
-        # Pastikan document cache sudah di-update
-        if not document_cache or document_vectors is None:
-            update_document_cache()
-        
-        # Normalisasi query
-        normalized_query = normalize_text(query)
-        
-        # Transform query ke TF-IDF
-        query_vector = tfidf_vectorizer.transform([normalized_query])
-        
-        # Hitung similarity dengan semua dokumen
-        similarities = cosine_similarity(query_vector, document_vectors).flatten()
-        
-        # Dapatkan top_n dokumen dengan similarity tertinggi
-        top_indices = np.argsort(similarities)[::-1][:top_n]
-        
-        # Format hasil
-        results = []
-        doc_ids = list(document_cache.keys())
-        
-        for idx in top_indices:
-            if similarities[idx] > 0:  # Hanya ambil yang memiliki similarity > 0
-                doc_id = doc_ids[idx]
-                doc_text = document_cache[doc_id]
-                similarity_score = similarities[idx]
-                results.append((doc_id, doc_text, similarity_score))
-        
-        return results
-    except Exception as e:
-        logger.error(f"Error finding best matches with TF-IDF: {e}")
-        return []
-
-def find_answer_with_search_index(question: str) -> str:
-    """Mencari jawaban menggunakan search index"""
-    try:
-        # Normalisasi pertanyaan
-        question_normalized = normalize_text(question)
-        words = question_normalized.split()
-        
-        # Filter kata-kata yang terlalu pendek
-        words = [word for word in words if len(word) > 2]
-        
-        if not words:
-            return "Pertanyaan terlalu pendek"
-        
-        # Cari exact match terlebih dahulu
-        query = """
-        SELECT answer 
-        FROM `{0}` 
-        WHERE question_normalized = @question_normalized
-        LIMIT 1
-        """.format(TABLE_REF)
-        
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("question_normalized", "STRING", question_normalized)
-            ]
-        )
-        
-        query_job = bq_client.query(query, job_config=job_config)
-        results = list(query_job.result())
-        
-        if results:
-            return results[0].answer
-        
-        # Jika tidak ditemukan, gunakan search index
-        # Hitung kemiripan untuk setiap dokumen yang mengandung kata-kata kunci
-        query = f"""
-        WITH matching_docs AS (
-            SELECT DISTINCT id
-            FROM `{INDEX_TABLE_REF}`
-            WHERE word IN UNNEST(@words)
-        ),
-        word_counts AS (
-            SELECT 
-                d.id,
-                d.question_normalized,
-                COUNT(i.word) AS match_count
-            FROM `{TABLE_REF}` d
-            JOIN matching_docs m ON d.id = m.id
-            LEFT JOIN `{INDEX_TABLE_REF}` i ON d.id = i.id AND i.word IN UNNEST(@words)
-            GROUP BY d.id, d.question_normalized
-        )
-        SELECT id, question_normalized, match_count / ARRAY_LENGTH(SPLIT(question_normalized, ' ')) AS score
-        FROM word_counts
-        ORDER BY score DESC
-        LIMIT 10
-        """
-        
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ArrayQueryParameter("words", "STRING", words)
-            ]
-        )
-        
-        query_job = bq_client.query(query, job_config=job_config)
-        results = list(query_job.result())
-        
-        if results:
-            best_match = results[0]
-            
-            if best_match.score > 0.3:  # Threshold untuk kemiripan
-                # Ambil jawaban dari database
-                query = """
-                SELECT answer 
-                FROM `{0}` 
-                WHERE id = @doc_id
-                LIMIT 1
-                """.format(TABLE_REF)
-                
-                job_config = bigquery.QueryJobConfig(
-                    query_parameters=[
-                        bigquery.ScalarQueryParameter("doc_id", "STRING", best_match.id)
-                    ]
-                )
-                
-                query_job = bq_client.query(query, job_config=job_config)
-                result = list(query_job.result())[0]
-                
-                logger.info(f"Ditemukan jawaban dengan search index, skor {best_match.score:.3f}")
-                return result.answer
-        
-        # Jika masih tidak ditemukan, gunakan TF-IDF
-        best_matches = find_best_matches_tfidf(question)
-        
-        if best_matches:
-            best_match_id, _, best_score = best_matches[0]
-            
-            if best_score > SIMILARITY_THRESHOLD:
-                # Ambil jawaban dari database
-                query = """
-                SELECT answer 
-                FROM `{0}` 
-                WHERE id = @doc_id
-                LIMIT 1
-                """.format(TABLE_REF)
-                
-                job_config = bigquery.QueryJobConfig(
-                    query_parameters=[
-                        bigquery.ScalarQueryParameter("doc_id", "STRING", best_match_id)
-                    ]
-                )
-                
-                query_job = bq_client.query(query, job_config=job_config)
-                results = list(query_job.result())
-                
-                if results:
-                    logger.info(f"Ditemukan jawaban dengan TF-IDF, skor {best_score:.3f}")
-                    return results[0].answer
-        
-        return "Jawaban tidak ditemukan"
-    except Exception as e:
-        logger.error(f"Error dalam search index: {e}")
-        return "Maaf, terjadi kesalahan saat mencari jawaban"
+    
+    # Hitung intersection
+    intersection = query_words.intersection(doc_words)
+    
+    # Hitung union
+    union = query_words.union(doc_words)
+    
+    # Jaccard similarity
+    return len(intersection) / len(union) if union else 0
 
 def is_except_question(question: str) -> bool:
     """Mendeteksi apakah pertanyaan mengandung kata 'kecuali'"""
@@ -541,11 +239,6 @@ def simpan_soal(question: str, answer: str, source: str = "manual") -> bool:
             return False
         
         logger.info("Soal berhasil disimpan ke database")
-        
-        # Update cache and index
-        update_document_cache()
-        create_search_index()
-        
         return True
     except Exception as e:
         logger.error(f"Error menyimpan soal: {e}")
@@ -581,11 +274,6 @@ def parse_qa_text(text: str) -> List[Tuple[str, str]]:
 def ocr_with_google_vision(image_content: bytes) -> str:
     """Melakukan OCR pada gambar menggunakan Google Cloud Vision API"""
     try:
-        # Cek ukuran konten
-        if len(image_content) > MAX_IMAGE_SIZE:
-            logger.warning(f"Image content too large for OCR: {len(image_content)} bytes")
-            return ""
-        
         image = vision.Image(content=image_content)
         response = vision_client.document_text_detection(image=image)
         
@@ -605,11 +293,6 @@ def ocr_with_google_vision(image_content: bytes) -> str:
 def ocr_with_ocr_space(image_content: bytes) -> str:
     """Melakukan OCR pada gambar menggunakan OCR.Space API sebagai fallback"""
     try:
-        # Cek ukuran konten
-        if len(image_content) > MAX_IMAGE_SIZE:
-            logger.warning(f"Image content too large for OCR: {len(image_content)} bytes")
-            return ""
-        
         # Buat file temporary untuk gambar
         with NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
             temp_file.write(image_content)
@@ -696,8 +379,112 @@ def find_answer_from_question(question: str) -> str:
         
         logger.info(f"Mencari jawaban untuk: '{question}' (normalized: '{question_normalized}')")
         
-        # Gunakan pendekatan baru dengan search index
-        return find_answer_with_search_index(question)
+        # Langkah 1: Cari exact match di question_normalized
+        try:
+            query = """
+            SELECT answer 
+            FROM `{0}` 
+            WHERE question_normalized = @question_normalized
+            LIMIT 1
+            """.format(TABLE_REF)
+            
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("question_normalized", "STRING", question_normalized)
+                ]
+            )
+            
+            query_job = bq_client.query(query, job_config=job_config)
+            results = list(query_job.result())
+            
+            if results:
+                logger.info("Ditemukan exact match di question_normalized")
+                return results[0].answer
+        except Exception as e:
+            logger.error(f"Error pada query exact match question_normalized: {e}")
+        
+        # Langkah 2: Jika tidak ditemukan, coba dengan normalisasi alternatif
+        try:
+            # Normalisasi alternatif: hapus semua karakter non-alfanumerik termasuk spasi
+            alt_normalized = re.sub(r'[^a-zA-Z0-9]', '', question_normalized)
+            logger.info(f"Normalisasi alternatif: '{alt_normalized}'")
+            
+            query = """
+            SELECT answer, question_normalized
+            FROM `{0}` 
+            WHERE REPLACE(REPLACE(question_normalized, ' ', ''), '_', '') = @alt_normalized
+            LIMIT 1
+            """.format(TABLE_REF)
+            
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("alt_normalized", "STRING", alt_normalized)
+                ]
+            )
+            
+            query_job = bq_client.query(query, job_config=job_config)
+            results = list(query_job.result())
+            
+            if results:
+                logger.info("Ditemukan exact match dengan normalisasi alternatif")
+                return results[0].answer
+        except Exception as e:
+            logger.error(f"Error pada query normalisasi alternatif: {e}")
+        
+        # Langkah 3: Jika masih tidak ditemukan, lakukan fuzzy search dengan LIKE
+        try:
+            # Ambil kata-kata kunci dari pertanyaan yang sudah dinormalisasi
+            words = question_normalized.split()
+            if not words:
+                raise ValueError("No words found after normalization")
+            
+            logger.info(f"Kata kunci untuk pencarian fuzzy: {words}")
+            
+            # Buat kondisi LIKE untuk setiap kata
+            conditions = []
+            for word in words:
+                if len(word) > 2:  # Abaikan kata yang terlalu pendek
+                    conditions.append(f"question_normalized LIKE '%{word}%'")
+            
+            if not conditions:
+                raise ValueError("No valid conditions for fuzzy search")
+            
+            where_clause = " AND ".join(conditions)
+            
+            query = f"""
+            SELECT answer, question_normalized
+            FROM `{TABLE_REF}`
+            WHERE {where_clause}
+            LIMIT 10
+            """
+            
+            query_job = bq_client.query(query)
+            results = list(query_job.result())
+            
+            if results:
+                # Hitung kemiripan untuk setiap hasil
+                best_match = None
+                best_score = 0
+                
+                for row in results:
+                    # Hitung kemiripan
+                    score = calculate_similarity(question_normalized, row.question_normalized)
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_match = row.answer
+                        logger.debug(f"New best match: score={best_score:.3f}, answer={best_match[:50]}...")
+                
+                # Threshold untuk kemiripan
+                if best_match and best_score > 0.5:
+                    logger.info(f"Ditemukan jawaban dengan fuzzy search, skor {best_score:.3f}: {best_match}")
+                    return best_match
+        except Exception as e:
+            logger.error(f"Error pada query fuzzy search: {e}")
+        
+        # Langkah 4: Jika masih tidak ditemukan, balas "Jawaban tidak ditemukan"
+        logger.info("Jawaban tidak ditemukan di database")
+        return "Jawaban tidak ditemukan"
                 
     except Exception as e:
         logger.error(f"Error mencari jawaban: {str(e)}", exc_info=True)
@@ -736,13 +523,6 @@ def process_csv_file(file_bytes: bytes) -> int:
     except Exception as e:
         logger.error(f"Error processing CSV: {e}")
         return 0
-
-async def send_size_error(update: Update, file_type: str, max_size: int, actual_size: int):
-    """Kirim pesan error ukuran file"""
-    await update.message.reply_text(
-        f"Ukuran {file_type} terlalu besar. Maksimal {max_size/1024/1024:.1f}MB. "
-        f"Ukuran {file_type} Anda: {actual_size/1024/1024:.1f}MB"
-    )
 
 # =======================
 # 🤖 TELEGRAM BOT HANDLER
@@ -864,13 +644,7 @@ async def cari_jawaban_gambar(update: Update, context: ContextTypes.DEFAULT_TYPE
         photo = update.message.photo[-1]  # Ambil resolusi tertinggi
         file_id = photo.file_id
         file_size = photo.file_size
-        
         logger.info(f"User {user.username} ({user.id}) mencari jawaban dari gambar dengan ID: {file_id} ({file_size} bytes)")
-        
-        # Cek ukuran file
-        if file_size > MAX_IMAGE_SIZE:
-            await send_size_error(update, "gambar", MAX_IMAGE_SIZE, file_size)
-            return
         
         # Tampilkan status sedang memproses
         await update.message.reply_chat_action(action="typing")
@@ -878,31 +652,6 @@ async def cari_jawaban_gambar(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Download gambar
         file = await context.bot.get_file(file_id)
         file_bytes = await file.download_as_bytearray()
-        
-        # Cek dimensi gambar (opsional)
-        try:
-            from PIL import Image
-            img = Image.open(io.BytesIO(file_bytes))
-            width, height = img.size
-            
-            if width > MAX_IMAGE_WIDTH or height > MAX_IMAGE_HEIGHT:
-                await update.message.reply_text(
-                    f"Dimensi gambar terlalu besar. Maksimal {MAX_IMAGE_WIDTH}x{MAX_IMAGE_HEIGHT} piksel. "
-                    f"Dimensi gambar Anda: {width}x{height} piksel"
-                )
-                return
-                
-            # Resize gambar jika perlu (opsional)
-            if width > 1000 or height > 1000:
-                img.thumbnail((1000, 1000))
-                buffer = io.BytesIO()
-                img.save(buffer, format="JPEG")
-                file_bytes = buffer.getvalue()
-                
-        except ImportError:
-            logger.warning("Pillow not installed, skipping image dimension check")
-        except Exception as e:
-            logger.error(f"Error checking image dimensions: {e}")
         
         # Lakukan OCR dengan Google Vision terlebih dahulu
         ocr_text = ocr_with_google_vision(bytes(file_bytes))
@@ -985,13 +734,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"User {user.username} ({user.id}) mengupload file: {filename} ({file_size} bytes)")
         
         # Hanya terima file CSV
-        if not filename.lower().endswith('.csv'):
+        if not filename.endswith('.csv'):
             await update.message.reply_text("Hanya file CSV yang didukung.")
-            return
-        
-        # Cek ukuran file
-        if file_size > MAX_CSV_SIZE:
-            await send_size_error(update, "file", MAX_CSV_SIZE, file_size)
             return
         
         # Tampilkan status sedang memproses
