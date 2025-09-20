@@ -7,7 +7,7 @@ import datetime
 import csv
 import uuid
 from tempfile import NamedTemporaryFile
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 from collections import Counter
 import math
 import requests
@@ -39,13 +39,21 @@ OCR_SPACE_API_KEY = "K84451990188957"
 bq_client = None
 vision_client = None
 
-# Daftar stopwords (kata umum yang diabaikan) - Perbaikan: hapus duplikasi
+# Daftar stopwords (kata umum yang diabaikan) - Perbaikan: tambahkan lebih banyak stopwords
 STOPWORDS = {
     'yang', 'dan', 'di', 'ke', 'dari', 'pada', 'adalah', 'itu', 'dengan', 
     'untuk', 'tidak', 'ini', 'dalam', 'akan', 'juga', 'atau', 'karena',
     'seperti', 'jika', 'saya', 'anda', 'kami', 'mereka', 'ada', 'bisa',
-    'dapat', 'lebih', 'sudah', 'belum', 'yaitu', 'yakni',
-    'ialah', 'merupakan', 'tersebut', 'tersebutlah'
+    'dapat', 'lebih', 'sudah', 'belum', 'yaitu', 'yakni', 'ialah', 
+    'merupakan', 'tersebut', 'tersebutlah', 'oleh', 'sebuah', 'sebagai',
+    'agar', 'supaya', 'hingga', 'sampai', 'setelah', 'sebelum', 'ketika',
+    'dimana', 'kemana', 'darimana', 'bagaimana', 'mengapa', 'kapan',
+    'siapa', 'apa', 'berapa', 'berapa banyak', 'berapa lama'
+}
+
+# Kata kunci penting yang sebaiknya tidak dihapus
+IMPORTANT_KEYWORDS = {
+    'tidak', 'bukan', 'kecuali', 'selain', 'hanya', 'cuma', 'melainkan'
 }
 
 # =======================
@@ -86,14 +94,14 @@ def initialize_services():
         raise
 
 def normalize_text(text: str) -> str:
-    """Normalisasi teks: hapus semua tanda baca dan spasi berlebih"""
+    """Normalisasi teks: hapus tanda baca dan spasi berlebih, tetapi pertahankan kata penting"""
     try:
         # Konversi ke bentuk unicode NFKD untuk menangani karakter khusus
         normalized = unicodedata.normalize('NFKD', text)
         
-        # Hapus semua tanda baca termasuk karakter khusus seperti ..., :, dll.
-        # Pola ini menghapus semua karakter non-alfanumerik kecuali spasi
-        normalized = re.sub(r'[^\w\s]', ' ', normalized)
+        # Hapus tanda baca kecuali yang penting untuk konteks (seperti ?)
+        # Pertahankan tanda tanya untuk pertanyaan
+        normalized = re.sub(r'[^\w\s\?]', ' ', normalized)
         
         # Hapus spasi berlebih (ganti multiple spasi dengan satu spasi)
         normalized = re.sub(r'\s+', ' ', normalized)
@@ -128,45 +136,91 @@ def clean_ocr_text(text: str) -> str:
         return text
 
 def get_keywords(text: str) -> List[str]:
-    """Ekstrak kata kunci dari teks"""
+    """Ekstrak kata kunci dari teks dengan mempertimbangkan kata penting"""
     # Normalisasi teks terlebih dahulu
     normalized_text = normalize_text(text)
     words = normalized_text.split()
     keywords = []
     
     for word in words:
-        if word not in STOPWORDS and len(word) > 2:
+        # Pertahankan kata penting meskipun termasuk stopwords
+        if word in IMPORTANT_KEYWORDS:
+            keywords.append(word)
+        elif word not in STOPWORDS and len(word) > 2:
             keywords.append(word)
     
     return keywords
 
 def calculate_similarity(query: str, document: str) -> float:
-    """Hitung kemiripan sederhana antara query dan document"""
+    """Hitung kemiripan yang lebih baik antara query dan document menggunakan TF-IDF-like approach"""
     # Normalisasi keduanya sebelum perbandingan
     normalized_query = normalize_text(query)
     normalized_document = normalize_text(document)
     
-    query_words = set(get_keywords(normalized_query))
-    doc_words = set(get_keywords(normalized_document))
+    query_words = get_keywords(normalized_query)
+    doc_words = get_keywords(normalized_document)
     
     if not query_words or not doc_words:
         return 0.0
     
-    # Hitung intersection
-    intersection = query_words.intersection(doc_words)
+    # Hitung frekuensi kata
+    query_freq = Counter(query_words)
+    doc_freq = Counter(doc_words)
     
-    # Hitung union
-    union = query_words.union(doc_words)
+    # Hitung skor kemiripan dengan mempertimbangkan frekuensi
+    intersection_score = 0
+    for word in set(query_words):
+        if word in doc_words:
+            # Beri bobot lebih untuk kata yang jarang muncul
+            word_score = (1 + math.log(query_freq[word] + 1)) * (1 + math.log(doc_freq[word] + 1))
+            intersection_score += word_score
     
-    # Jaccard similarity
-    return len(intersection) / len(union) if union else 0
+    # Normalisasi skor
+    query_norm = math.sqrt(sum([(1 + math.log(freq + 1))**2 for freq in query_freq.values()]))
+    doc_norm = math.sqrt(sum([(1 + math.log(freq + 1))**2 for freq in doc_freq.values()]))
+    
+    if query_norm == 0 or doc_norm == 0:
+        return 0.0
+    
+    # Cosine similarity
+    similarity = intersection_score / (query_norm * doc_norm)
+    
+    # Beri bonus untuk kata kunci penting yang cocok
+    important_matches = set(query_words) & set(doc_words) & IMPORTANT_KEYWORDS
+    if important_matches:
+        similarity += 0.2  # Bonus 20% untuk kata penting yang cocok
+    
+    return min(similarity, 1.0)  # Pastikan skor tidak melebihi 1.0
 
 def is_except_question(question: str) -> bool:
-    """Mendeteksi apakah pertanyaan mengandung kata 'kecuali'"""
+    """Mendeteksi apakah pertanyaan mengandung kata 'kecuali' atau negasi"""
     # Normalisasi pertanyaan sebelum pengecekan
     normalized_question = normalize_text(question)
-    except_keywords = ['kecuali', 'bukan', 'tidak termasuk']
+    except_keywords = ['kecuali', 'bukan', 'tidak termasuk', 'selain', 'bukan termasuk']
     return any(keyword in normalized_question for keyword in except_keywords)
+
+def is_question_type(question: str, question_type: str) -> bool:
+    """Mendeteksi tipe pertanyaan berdasarkan kata kunci"""
+    normalized_question = normalize_text(question)
+    
+    question_types = {
+        'who': ['siapa', 'siapakah', 'nama siapa'],
+        'what': ['apa', 'apakah', 'gimana', 'bagaimana'],
+        'when': ['kapan', 'kapankah', 'kapan saja'],
+        'where': ['dimana', 'di mana', 'kemana'],
+        'why': ['mengapa', 'kenapa'],
+        'how': ['bagaimana', 'gimana cara', 'bagaimana cara'],
+        'how_many': ['berapa', 'berapa banyak', 'berapa jumlah'],
+        'which': ['yang mana', 'manakah'],
+        'yes_no': ['apakah', 'benarkah', 'betulkah'],
+        'except': ['kecuali', 'bukan', 'tidak termasuk', 'selain']
+    }
+    
+    if question_type in question_types:
+        keywords = question_types[question_type]
+        return any(keyword in normalized_question for keyword in keywords)
+    
+    return False
 
 def handle_short_questions(question: str) -> Optional[str]:
     """Menangani pertanyaan singkat yang umum"""
@@ -379,6 +433,14 @@ def find_answer_from_question(question: str) -> str:
         
         logger.info(f"Mencari jawaban untuk: '{question}' (normalized: '{question_normalized}')")
         
+        # Deteksi tipe pertanyaan
+        question_types = []
+        for q_type in ['who', 'what', 'when', 'where', 'why', 'how', 'how_many', 'which', 'yes_no', 'except']:
+            if is_question_type(question, q_type):
+                question_types.append(q_type)
+        
+        logger.info(f"Tipe pertanyaan terdeteksi: {question_types}")
+        
         # Langkah 1: Cari exact match di question_normalized
         try:
             query = """
@@ -434,55 +496,138 @@ def find_answer_from_question(question: str) -> str:
         # Langkah 3: Jika masih tidak ditemukan, lakukan fuzzy search dengan LIKE
         try:
             # Ambil kata-kata kunci dari pertanyaan yang sudah dinormalisasi
-            words = question_normalized.split()
-            if not words:
-                raise ValueError("No words found after normalization")
+            keywords = get_keywords(question_normalized)
+            if not keywords:
+                raise ValueError("No keywords found after normalization")
             
-            logger.info(f"Kata kunci untuk pencarian fuzzy: {words}")
+            logger.info(f"Kata kunci untuk pencarian fuzzy: {keywords}")
             
-            # Buat kondisi LIKE untuk setiap kata
-            conditions = []
-            for word in words:
-                if len(word) > 2:  # Abaikan kata yang terlalu pendek
-                    conditions.append(f"question_normalized LIKE '%{word}%'")
-            
-            if not conditions:
-                raise ValueError("No valid conditions for fuzzy search")
-            
-            where_clause = " AND ".join(conditions)
-            
-            query = f"""
-            SELECT answer, question_normalized
-            FROM `{TABLE_REF}`
-            WHERE {where_clause}
-            LIMIT 10
-            """
-            
-            query_job = bq_client.query(query)
-            results = list(query_job.result())
-            
-            if results:
-                # Hitung kemiripan untuk setiap hasil
-                best_match = None
-                best_score = 0
+            # Untuk pertanyaan 'kecuali', kita perlu pendekatan berbeda
+            if 'except' in question_types:
+                # Cari semua jawaban yang tidak mengandung kata kunci tertentu
+                # atau yang sesuai dengan pola pertanyaan kecuali
+                logger.info("Menggunakan strategi pencarian untuk pertanyaan 'kecuali'")
                 
-                for row in results:
-                    # Hitung kemiripan
-                    score = calculate_similarity(question_normalized, row.question_normalized)
+                # Ambil semua kata kunci kecuali kata 'kecuali' itu sendiri
+                except_keywords = [kw for kw in keywords if kw not in ['kecuali', 'bukan', 'selain']]
+                
+                if except_keywords:
+                    # Buat kondisi LIKE untuk setiap kata
+                    conditions = []
+                    for word in except_keywords:
+                        if len(word) > 2:  # Abaikan kata yang terlalu pendek
+                            conditions.append(f"question_normalized LIKE '%{word}%'")
                     
-                    if score > best_score:
-                        best_score = score
-                        best_match = row.answer
-                        logger.debug(f"New best match: score={best_score:.3f}, answer={best_match[:50]}...")
+                    if conditions:
+                        where_clause = " AND ".join(conditions)
+                        
+                        query = f"""
+                        SELECT answer, question_normalized
+                        FROM `{TABLE_REF}`
+                        WHERE {where_clause}
+                        LIMIT 10
+                        """
+                        
+                        query_job = bq_client.query(query)
+                        results = list(query_job.result())
+                        
+                        if results:
+                            # Untuk pertanyaan 'kecuali', kita perlu mencari jawaban yang berbeda
+                            # dari kebanyakan jawaban lain yang mengandung kata kunci tersebut
+                            return f"Pertanyaan bertipe 'kecuali'. Ditemukan {len(results)} kemungkinan jawaban. Silakan periksa kembali pertanyaan Anda."
+            else:
+                # Untuk pertanyaan biasa, gunakan pendekatan fuzzy search biasa
+                # Buat kondisi LIKE untuk setiap kata
+                conditions = []
+                for word in keywords:
+                    if len(word) > 2:  # Abaikan kata yang terlalu pendek
+                        conditions.append(f"question_normalized LIKE '%{word}%'")
                 
-                # Threshold untuk kemiripan
-                if best_match and best_score > 0.5:
-                    logger.info(f"Ditemukan jawaban dengan fuzzy search, skor {best_score:.3f}: {best_match}")
-                    return best_match
+                if not conditions:
+                    raise ValueError("No valid conditions for fuzzy search")
+                
+                where_clause = " AND ".join(conditions)
+                
+                query = f"""
+                SELECT answer, question_normalized
+                FROM `{TABLE_REF}`
+                WHERE {where_clause}
+                LIMIT 10
+                """
+                
+                query_job = bq_client.query(query)
+                results = list(query_job.result())
+                
+                if results:
+                    # Hitung kemiripan untuk setiap hasil
+                    best_match = None
+                    best_score = 0
+                    
+                    for row in results:
+                        # Hitung kemiripan
+                        score = calculate_similarity(question_normalized, row.question_normalized)
+                        
+                        if score > best_score:
+                            best_score = score
+                            best_match = row.answer
+                            logger.debug(f"New best match: score={best_score:.3f}, answer={best_match[:50]}...")
+                    
+                    # Threshold untuk kemiripan - lebih tinggi untuk akurasi lebih baik
+                    if best_match and best_score > 0.6:  # Naikkan threshold dari 0.5 ke 0.6
+                        logger.info(f"Ditemukan jawaban dengan fuzzy search, skor {best_score:.3f}: {best_match}")
+                        return best_match
         except Exception as e:
             logger.error(f"Error pada query fuzzy search: {e}")
         
-        # Langkah 4: Jika masih tidak ditemukan, balas "Jawaban tidak ditemukan"
+        # Langkah 4: Jika masih tidak ditemukan, coba dengan kata kunci yang lebih sedikit
+        try:
+            # Ambil kata-kata kunci yang paling penting
+            keywords = get_keywords(question_normalized)
+            
+            if len(keywords) > 3:
+                # Ambil hanya 3 kata kunci pertama yang terpanjang
+                important_keywords = sorted(keywords, key=len, reverse=True)[:3]
+                logger.info(f"Mencoba dengan kata kunci yang lebih sedikit: {important_keywords}")
+                
+                # Buat kondisi LIKE untuk kata kunci penting
+                conditions = []
+                for word in important_keywords:
+                    conditions.append(f"question_normalized LIKE '%{word}%'")
+                
+                where_clause = " OR ".join(conditions)  # Gunakan OR untuk mencari lebih banyak hasil
+                
+                query = f"""
+                SELECT answer, question_normalized
+                FROM `{TABLE_REF}`
+                WHERE {where_clause}
+                LIMIT 20
+                """
+                
+                query_job = bq_client.query(query)
+                results = list(query_job.result())
+                
+                if results:
+                    # Hitung kemiripan untuk setiap hasil
+                    best_match = None
+                    best_score = 0
+                    
+                    for row in results:
+                        # Hitung kemiripan
+                        score = calculate_similarity(question_normalized, row.question_normalized)
+                        
+                        if score > best_score:
+                            best_score = score
+                            best_match = row.answer
+                            logger.debug(f"New best match (reduced keywords): score={best_score:.3f}, answer={best_match[:50]}...")
+                    
+                    # Threshold yang sedikit lebih rendah untuk pencarian dengan kata kunci berkurang
+                    if best_match and best_score > 0.5:
+                        logger.info(f"Ditemukan jawaban dengan kata kunci berkurang, skor {best_score:.3f}: {best_match}")
+                        return best_match
+        except Exception as e:
+            logger.error(f"Error pada query dengan kata kunci berkurang: {e}")
+        
+        # Langkah 5: Jika masih tidak ditemukan, balas "Jawaban tidak ditemukan"
         logger.info("Jawaban tidak ditemukan di database")
         return "Jawaban tidak ditemukan"
                 
