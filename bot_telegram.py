@@ -91,14 +91,14 @@ def normalize_text(text: str) -> str:
         # Konversi ke bentuk unicode NFKD untuk menangani karakter khusus
         normalized = unicodedata.normalize('NFKD', text)
         
-        # Hapus semua tanda baca
+        # Hapus semua tanda baca termasuk karakter khusus seperti ..., :, dll.
         normalized = re.sub(r'[^\w\s]', ' ', normalized)
-        
-        # Ubah ke lowercase
-        normalized = normalized.lower()
         
         # Hapus spasi berlebih
         normalized = re.sub(r'\s+', ' ', normalized)
+        
+        # Ubah ke lowercase
+        normalized = normalized.lower()
         
         # Hapus spasi di awal dan akhir
         result = normalized.strip()
@@ -401,7 +401,34 @@ def find_answer_from_question(question: str) -> str:
         except Exception as e:
             logger.error(f"Error pada query exact match question_normalized: {e}")
         
-        # Langkah 2: Jika tidak ditemukan, lakukan fuzzy search dengan LIKE
+        # Langkah 2: Jika tidak ditemukan, coba dengan normalisasi alternatif
+        try:
+            # Normalisasi alternatif: hapus semua karakter non-alfanumerik termasuk spasi
+            alt_normalized = re.sub(r'[^a-zA-Z0-9]', '', question_normalized)
+            
+            query = """
+            SELECT answer, question_normalized
+            FROM `{0}` 
+            WHERE REPLACE(REPLACE(question_normalized, ' ', ''), '_', '') = @alt_normalized
+            LIMIT 1
+            """.format(TABLE_REF)
+            
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("alt_normalized", "STRING", alt_normalized)
+                ]
+            )
+            
+            query_job = bq_client.query(query, job_config=job_config)
+            results = list(query_job.result())
+            
+            if results:
+                logger.info("Ditemukan exact match dengan normalisasi alternatif")
+                return results[0].answer
+        except Exception as e:
+            logger.error(f"Error pada query normalisasi alternatif: {e}")
+        
+        # Langkah 3: Jika masih tidak ditemukan, lakukan fuzzy search dengan LIKE
         try:
             # Ambil kata-kata kunci dari pertanyaan yang sudah dinormalisasi
             words = question_normalized.split()
@@ -450,7 +477,7 @@ def find_answer_from_question(question: str) -> str:
         except Exception as e:
             logger.error(f"Error pada query fuzzy search: {e}")
         
-        # Langkah 3: Jika masih tidak ditemukan, balas "Jawaban tidak ditemukan"
+        # Langkah 4: Jika masih tidak ditemukan, balas "Jawaban tidak ditemukan"
         logger.info("Jawaban tidak ditemukan di database")
         return "Jawaban tidak ditemukan"
                 
@@ -774,4 +801,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
