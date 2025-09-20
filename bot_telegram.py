@@ -7,7 +7,7 @@ import datetime
 import csv
 import uuid
 from tempfile import NamedTemporaryFile
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from collections import Counter
 import math
 import requests
@@ -39,13 +39,13 @@ OCR_SPACE_API_KEY = "K84451990188957"
 bq_client = None
 vision_client = None
 
-# Daftar stopwords (kata umum yang diabaikan)
+# Daftar stopwords (kata umum yang diabaikan) - Perbaikan: hapus duplikasi
 STOPWORDS = {
     'yang', 'dan', 'di', 'ke', 'dari', 'pada', 'adalah', 'itu', 'dengan', 
     'untuk', 'tidak', 'ini', 'dalam', 'akan', 'juga', 'atau', 'karena',
     'seperti', 'jika', 'saya', 'anda', 'kami', 'mereka', 'ada', 'bisa',
-    'dapat', 'lebih', 'sudah', 'belum', 'bisa', 'dapat', 'yaitu', 'yakni',
-    'adalah', 'ialah', 'merupakan', 'tersebut', 'tersebutlah'
+    'dapat', 'lebih', 'sudah', 'belum', 'yaitu', 'yakni',
+    'ialah', 'merupakan', 'tersebut', 'tersebutlah'
 }
 
 # =======================
@@ -165,10 +165,10 @@ def is_except_question(question: str) -> bool:
     """Mendeteksi apakah pertanyaan mengandung kata 'kecuali'"""
     # Normalisasi pertanyaan sebelum pengecekan
     normalized_question = normalize_text(question)
-    except_keywords = ['kecuali', 'bukan', 'tidak termasuk', 'kecuali']
+    except_keywords = ['kecuali', 'bukan', 'tidak termasuk']
     return any(keyword in normalized_question for keyword in except_keywords)
 
-def handle_short_questions(question: str) -> str:
+def handle_short_questions(question: str) -> Optional[str]:
     """Menangani pertanyaan singkat yang umum"""
     # Normalisasi pertanyaan sebelum pencocokan
     normalized_question = normalize_text(question)
@@ -186,7 +186,7 @@ def handle_short_questions(question: str) -> str:
         if normalize_text(key) == normalized_question:
             return value
     
-    return ""
+    return None
 
 # =======================
 # ⚙️ FUNGSI UTAMA
@@ -302,7 +302,7 @@ def ocr_with_ocr_space(image_content: bytes) -> str:
         payload = {
             'isOverlayRequired': False,
             'apikey': OCR_SPACE_API_KEY,
-            'language': 'eng',  # Bisa diganti ke 'ind' untuk Bahasa Indonesia
+            'language': 'ind',  # Perbaikan: gunakan 'ind' untuk Bahasa Indonesia
         }
         
         # Siapkan file untuk diupload
@@ -520,6 +520,37 @@ def process_csv_file(file_bytes: bytes) -> int:
                     count_success += 1
                     
         return count_success
+    except UnicodeDecodeError:
+        # Try with different encoding
+        try:
+            content = file_bytes.decode('latin-1')
+            csv_reader = csv.reader(io.StringIO(content))
+            
+            # Read header
+            headers = next(csv_reader, [])
+            if not headers:
+                return 0
+                
+            # Find question and answer columns
+            question_cols, answer_cols = find_question_answer_columns(headers)
+            
+            if not question_cols or not answer_cols:
+                return 0
+                
+            # Process rows
+            count_success = 0
+            for row in csv_reader:
+                if len(row) > max(question_cols[0], answer_cols[0]):
+                    question = row[question_cols[0]].strip()
+                    answer = row[answer_cols[0]].strip()
+                    
+                    if question and answer and simpan_soal(question, answer, "csv_upload"):
+                        count_success += 1
+                        
+            return count_success
+        except Exception as e:
+            logger.error(f"Error processing CSV with latin-1: {e}")
+            return 0
     except Exception as e:
         logger.error(f"Error processing CSV: {e}")
         return 0
@@ -691,12 +722,13 @@ async def ocr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"User {user.username} ({user.id}) menggunakan command /ocr")
         
         # Cek apakah ada gambar yang dikirim sebelumnya
-        if not context.args or not context.args[0].startswith("file_id:"):
+        if not update.message.reply_to_message or not update.message.reply_to_message.photo:
             await update.message.reply_text("Kirim gambar terlebih dahulu, lalu reply dengan /ocr")
             return
         
-        # Ekstrak file_id dari argumen
-        file_id = context.args[0].replace("file_id:", "")
+        # Dapatkan gambar dari pesan yang di-reply
+        photo = update.message.reply_to_message.photo[-1]  # Ambil resolusi tertinggi
+        file_id = photo.file_id
         
         # Download gambar
         file = await context.bot.get_file(file_id)
