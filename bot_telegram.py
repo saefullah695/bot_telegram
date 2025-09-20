@@ -11,6 +11,7 @@ from typing import List, Tuple
 from collections import Counter
 import math
 import requests
+import unicodedata
 
 from google.cloud import bigquery
 from google.cloud import vision
@@ -27,8 +28,8 @@ logger = logging.getLogger(__name__)
 
 # Konfigurasi BigQuery
 PROJECT_ID = os.getenv("PROJECT_ID", "prime-chess-472020-b6")
-DATASET_ID = os.getenv("DATASET_ID", "bot_telegram_gabung")
-TABLE_ID = os.getenv("TABLE_ID", "banksoal_claned")
+DATASET_ID = os.getenv("DATASET_ID", "Data")
+TABLE_ID = os.getenv("TABLE_ID", "Telegram-new")
 TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 
 # OCR.Space API Key
@@ -76,23 +77,6 @@ def initialize_services():
             query_job = bq_client.query(test_query)
             results = list(query_job.result())
             logger.info(f"Test koneksi BigQuery berhasil. Jumlah data: {results[0].count}")
-            
-            # Debug: Tampilkan 5 contoh data dari tabel
-            debug_query = f"""
-            SELECT question, question_normalized, answer
-            FROM `{TABLE_REF}`
-            LIMIT 5
-            """
-            debug_job = bq_client.query(debug_query)
-            debug_results = list(debug_job.result())
-            logger.info("=== Contoh data di tabel ===")
-            for i, row in enumerate(debug_results):
-                logger.info(f"Record {i+1}:")
-                logger.info(f"  Question: '{row.question}'")
-                logger.info(f"  Normalized: '{row.question_normalized}'")
-                logger.info(f"  Answer: '{row.answer}'")
-                logger.info("---")
-                
         except Exception as e:
             logger.error(f"Test koneksi BigQuery gagal: {e}")
             
@@ -102,29 +86,28 @@ def initialize_services():
         raise
 
 def normalize_question(question: str) -> str:
-    """Normalisasi pertanyaan untuk pencarian dengan menghapus semua tanda baca dan spasi berlebih"""
+    """Normalisasi pertanyaan untuk pencarian - menghapus tanda baca dan spasi berlebih"""
     try:
+        # Konversi ke bentuk unicode NFKD untuk menangani karakter khusus
+        normalized = unicodedata.normalize('NFKD', question)
+        
+        # Hapus karakter non-ASCII kecuali spasi
+        normalized = re.sub(r'[^\w\s]', '', normalized)
+        
         # Ubah ke lowercase
-        normalized = question.lower()
+        normalized = normalized.lower()
         
-        # Hapus semua tanda baca (termasuk karakter khusus) dengan dukungan Unicode
-        # Pola regex ini menghapus semua karakter non-alphanumeric dan non-spasi
-        normalized = re.sub(r'[^\w\s]', ' ', normalized, flags=re.UNICODE)
-        
-        # Hapus spasi berlebih (ganti multiple spasi dengan single spasi)
+        # Hapus spasi berlebih
         normalized = re.sub(r'\s+', ' ', normalized)
         
-        # Hapus spasi di awal dan akhir string
+        # Hapus spasi di awal dan akhir
         result = normalized.strip()
         
-        # Log hasil normalisasi untuk debugging
         logger.info(f"Normalisasi pertanyaan: '{question}' -> '{result}'")
-        
         return result
     except Exception as e:
         logger.error(f"Error normalisasi pertanyaan: {e}")
-        # Fallback: sederhanakan pertanyaan dengan cara yang lebih aman
-        return ''.join(c.lower() if c.isalnum() else ' ' for c in question).strip()
+        return question.lower().strip()
 
 def clean_ocr_text(text: str) -> str:
     """Membersihkan teks hasil OCR dari format tambahan seperti timestamp"""
@@ -133,7 +116,7 @@ def clean_ocr_text(text: str) -> str:
         cleaned = re.sub(r'^\d{1,2}:\d{2}\s*', '', text)
         
         # Hapus karakter khusus yang tidak perlu
-        cleaned = re.sub(r'[^\w\s\?\.\,\!\-\:]', ' ', cleaned, flags=re.UNICODE)
+        cleaned = re.sub(r'[^\w\s\?\.\,\!\-\:]', ' ', cleaned)
         
         # Hapus spasi berlebih
         cleaned = re.sub(r'\s+', ' ', cleaned)
@@ -145,7 +128,9 @@ def clean_ocr_text(text: str) -> str:
 
 def get_keywords(text: str) -> List[str]:
     """Ekstrak kata kunci dari teks"""
-    words = text.split()
+    # Normalisasi teks terlebih dahulu
+    normalized_text = normalize_question(text)
+    words = normalized_text.split()
     keywords = []
     
     for word in words:
@@ -156,8 +141,12 @@ def get_keywords(text: str) -> List[str]:
 
 def calculate_similarity(query: str, document: str) -> float:
     """Hitung kemiripan sederhana antara query dan document"""
-    query_words = set(get_keywords(query))
-    doc_words = set(get_keywords(document))
+    # Normalisasi keduanya sebelum perbandingan
+    normalized_query = normalize_question(query)
+    normalized_document = normalize_question(document)
+    
+    query_words = set(get_keywords(normalized_query))
+    doc_words = set(get_keywords(normalized_document))
     
     if not query_words or not doc_words:
         return 0.0
@@ -173,22 +162,30 @@ def calculate_similarity(query: str, document: str) -> float:
 
 def is_except_question(question: str) -> bool:
     """Mendeteksi apakah pertanyaan mengandung kata 'kecuali'"""
+    # Normalisasi pertanyaan sebelum pengecekan
+    normalized_question = normalize_question(question)
     except_keywords = ['kecuali', 'bukan', 'tidak termasuk', 'kecuali']
-    return any(keyword in question.lower() for keyword in except_keywords)
+    return any(keyword in normalized_question for keyword in except_keywords)
 
 def handle_short_questions(question: str) -> str:
     """Menangani pertanyaan singkat yang umum"""
-    question_lower = question.lower().strip()
+    # Normalisasi pertanyaan sebelum pencocokan
+    normalized_question = normalize_question(question)
     
     # Daftar pertanyaan singkat dan jawabannya
     short_answers = {
-        "nama saya adalah ?": "muhammad alrafka firdaus",
-        "siapa nama saya?": "muhammad alrafka firdaus",
+        "nama saya adalah": "muhammad alrafka firdaus",
+        "siapa nama saya": "muhammad alrafka firdaus",
         "nama saya": "muhammad alrafka firdaus",
         # Tambahkan pertanyaan singkat lainnya di sini
     }
     
-    return short_answers.get(question_lower, "")
+    # Cocokkan dengan versi normalisasi
+    for key, value in short_answers.items():
+        if normalize_question(key) == normalized_question:
+            return value
+    
+    return ""
 
 # =======================
 # ⚙️ FUNGSI UTAMA
@@ -204,7 +201,6 @@ def simpan_soal(question: str, answer: str, source: str = "manual") -> bool:
 
         # Normalisasi pertanyaan
         question_normalized = normalize_question(question)
-        logger.info(f"Menyimpan soal: '{question}' -> normalized: '{question_normalized}'")
 
         # Cek duplikat berdasarkan question_normalized
         query = f"""
@@ -373,17 +369,18 @@ def find_answer_from_question(question: str) -> str:
         
         # Normalisasi pertanyaan untuk pencarian
         question_normalized = normalize_question(question)
-        logger.info(f"Mencari jawaban untuk: '{question}' (normalized: '{question_normalized}')")
         
         # Validasi panjang pertanyaan
         if len(question_normalized) < 2:
             logger.warning(f"Pertanyaan terlalu pendek: '{question}' -> '{question_normalized}'")
             return "Pertanyaan terlalu pendek. Silakan berikan pertanyaan yang lebih lengkap."
         
+        logger.info(f"Mencari jawaban untuk: '{question}' (normalized: '{question_normalized}')")
+        
         # Langkah 1: Cari exact match di question_normalized
         try:
             query = """
-            SELECT answer, question, question_normalized 
+            SELECT answer 
             FROM `{0}` 
             WHERE question_normalized = @question_normalized
             LIMIT 1
@@ -399,21 +396,15 @@ def find_answer_from_question(question: str) -> str:
             results = list(query_job.result())
             
             if results:
-                row = results[0]
-                logger.info(f"Ditemukan exact match di question_normalized:")
-                logger.info(f"  - Question asli: '{row.question}'")
-                logger.info(f"  - Question normalized: '{row.question_normalized}'")
-                logger.info(f"  - Answer: '{row.answer}'")
-                return row.answer
-            else:
-                logger.info("Tidak ditemukan exact match di question_normalized")
+                logger.info("Ditemukan exact match di question_normalized")
+                return results[0].answer
         except Exception as e:
             logger.error(f"Error pada query exact match question_normalized: {e}")
         
         # Langkah 2: Jika tidak ditemukan, cari exact match di question
         try:
             query = """
-            SELECT answer, question, question_normalized 
+            SELECT answer 
             FROM `{0}` 
             WHERE question = @question
             LIMIT 1
@@ -429,14 +420,8 @@ def find_answer_from_question(question: str) -> str:
             results = list(query_job.result())
             
             if results:
-                row = results[0]
-                logger.info(f"Ditemukan exact match di question:")
-                logger.info(f"  - Question asli: '{row.question}'")
-                logger.info(f"  - Question normalized: '{row.question_normalized}'")
-                logger.info(f"  - Answer: '{row.answer}'")
-                return row.answer
-            else:
-                logger.info("Tidak ditemukan exact match di question")
+                logger.info("Ditemukan exact match di question")
+                return results[0].answer
         except Exception as e:
             logger.error(f"Error pada query exact match question: {e}")
         
@@ -491,16 +476,13 @@ def find_answer_from_question(question: str) -> str:
                 
                 if score > best_score:
                     best_score = score
-                    best_match = row
-                    logger.debug(f"New best match: score={best_score:.3f}, answer={best_match.answer[:50]}...")
+                    best_match = row.answer
+                    logger.debug(f"New best match: score={best_score:.3f}, answer={best_match[:50]}...")
             
             # Threshold untuk kemiripan
             if best_match and best_score > 0.3:
-                logger.info(f"Ditemukan jawaban dengan skor kemiripan {best_score:.3f}:")
-                logger.info(f"  - Question asli: '{best_match.question}'")
-                logger.info(f"  - Question normalized: '{best_match.question_normalized}'")
-                logger.info(f"  - Answer: '{best_match.answer}'")
-                return best_match.answer
+                logger.info(f"Ditemukan jawaban dengan skor kemiripan {best_score:.3f}: {best_match}")
+                return best_match
             else:
                 logger.info(f"Tidak ditemukan jawaban yang cukup mirip (best score: {best_score:.3f})")
                 return "Jawaban tidak ditemukan di database. Coba gunakan kata kunci yang lebih spesifik."
