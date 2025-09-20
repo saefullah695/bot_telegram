@@ -15,8 +15,6 @@ import unicodedata
 from difflib import SequenceMatcher
 
 from google.cloud import bigquery
-from google.cloud import vision
-from google.cloud.vision import ImageAnnotatorClient
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -30,15 +28,14 @@ logger = logging.getLogger(__name__)
 # Konfigurasi BigQuery
 PROJECT_ID = os.getenv("PROJECT_ID", "prime-chess-472020-b6")
 DATASET_ID = os.getenv("DATASET_ID", "Data")
-TABLE_ID = os.getenv("TABLE_ID", "mtk")
+TABLE_ID = os.getenv("TABLE_ID", "Telegram-new")
 TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 
 # OCR.Space API Key
-OCR_SPACE_API_KEY = "K84451990188957"
+OCR_SPACE_API_KEY = os.getenv("OCR_SPACE_API_KEY", "K84451990188957")
 
 # Global clients
 bq_client = None
-vision_client = None
 
 # Stopwords yang disederhanakan - hanya kata yang benar-benar tidak penting
 STOPWORDS = {
@@ -67,12 +64,12 @@ QUESTION_PATTERNS = {
 }
 
 # =======================
-# SETUP BIGQUERY & GOOGLE VISION
+# SETUP BIGQUERY
 # =======================
 
 def initialize_services():
-    """Inisialisasi BigQuery dan Google Vision Client"""
-    global bq_client, vision_client
+    """Inisialisasi BigQuery Client"""
+    global bq_client
     try:
         service_account_info = os.getenv("SERVICE_ACCOUNT_JSON")
         if service_account_info:
@@ -83,8 +80,7 @@ def initialize_services():
             logger.warning("SERVICE_ACCOUNT_JSON tidak ditemukan di environment variables")
         
         bq_client = bigquery.Client(project=PROJECT_ID)
-        vision_client = vision.ImageAnnotatorClient()
-        logger.info("BigQuery dan Vision clients berhasil diinisialisasi")
+        logger.info("BigQuery client berhasil diinisialisasi")
         
         # Test koneksi BigQuery
         test_query = f"SELECT COUNT(*) as count FROM `{TABLE_REF}` LIMIT 1"
@@ -92,7 +88,7 @@ def initialize_services():
         results = list(query_job.result())
         logger.info(f"Test koneksi BigQuery berhasil. Jumlah data: {results[0].count}")
             
-        return bq_client, vision_client
+        return bq_client
     except Exception as e:
         logger.error(f"Gagal menginisialisasi services: {e}")
         raise
@@ -366,7 +362,7 @@ def simpan_soal(question: str, answer: str, source: str = "manual") -> bool:
         query = """
         SELECT COUNT(*) as count 
         FROM `{0}` 
-        WHERE question_normalized = @question_normalized
+        WHERE CONTAINS_SUBSTR(question_normalized, @question_normalized)
         LIMIT 1
         """.format(TABLE_REF)
         
@@ -454,12 +450,16 @@ def find_answer_from_question(question: str) -> str:
         return "Terjadi kesalahan saat mencari jawaban. Silakan coba lagi nanti."
 
 def search_exact_match(question_normalized: str) -> Optional[str]:
-    """Pencarian exact match"""
+    """Pencarian exact match menggunakan CONTAINS_SUBSTR"""
     try:
+        if not question_normalized or len(question_normalized.strip()) < 3:
+            logger.warning("Question normalized terlalu pendek")
+            return None
+        
         query = """
         SELECT answer 
         FROM `{0}` 
-        WHERE question_normalized = @question_normalized
+        WHERE CONTAINS_SUBSTR(question_normalized, @question_normalized)
         LIMIT 1
         """.format(TABLE_REF)
         
@@ -490,18 +490,18 @@ def search_with_similarity(question_normalized: str, threshold: float = 0.7) -> 
         if not main_keywords:
             main_keywords = keywords[:2]  # Fallback ke 2 kata pertama
         
-        # Pre-filter dengan kata kunci untuk mengurangi dataset
-        conditions = []
+        # Buat pattern untuk REGEXP_CONTAINS
+        patterns = []
         for kw in main_keywords[:3]:  # Maksimal 3 kata kunci utama
-            conditions.append(f"question_normalized LIKE '%{kw}%'")
+            patterns.append(f'(?=.*{re.escape(kw)})')
         
-        where_clause = " OR ".join(conditions)
+        pattern = ''.join(patterns)
         
         query = f"""
         SELECT answer, question_normalized 
         FROM `{TABLE_REF}`
-        WHERE {where_clause}
-        LIMIT 300
+        WHERE REGEXP_CONTAINS(question_normalized, r'{pattern}')
+        LIMIT 100
         """
         
         query_job = bq_client.query(query)
@@ -531,7 +531,7 @@ def search_with_similarity(question_normalized: str, threshold: float = 0.7) -> 
         return None
 
 def search_with_keywords(question_normalized: str, question_types: List[str]) -> Optional[str]:
-    """Pencarian berdasarkan kata kunci dengan pendekatan yang lebih baik"""
+    """Pencarian berdasarkan kata kunci menggunakan SEARCH()"""
     try:
         keywords = extract_keywords(question_normalized)
         
@@ -548,26 +548,25 @@ def search_with_keywords(question_normalized: str, question_types: List[str]) ->
         
         logger.info(f"Searching dengan keywords: {search_keywords}")
         
-        # Buat query dengan REGEXP untuk pencarian yang lebih fleksibel
-        keyword_patterns = []
-        for kw in search_keywords:
-            keyword_patterns.append(f"question_normalized LIKE '%{kw}%'")
-        
-        # Gunakan OR untuk mendapat lebih banyak hasil
-        where_clause = " OR ".join(keyword_patterns)
+        # Buat pattern untuk SEARCH function
+        search_pattern = " ".join(search_keywords)
         
         query = f"""
         SELECT answer, question_normalized,
-               (
-                   {" + ".join([f"CASE WHEN question_normalized LIKE '%{kw}%' THEN 1 ELSE 0 END" for kw in search_keywords])}
-               ) as keyword_matches
+               SEARCH(question_normalized, @search_pattern) as search_score
         FROM `{TABLE_REF}`
-        WHERE {where_clause}
-        ORDER BY keyword_matches DESC
+        WHERE SEARCH(question_normalized, @search_pattern) > 0
+        ORDER BY search_score DESC
         LIMIT 30
         """
         
-        query_job = bq_client.query(query)
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("search_pattern", "STRING", search_pattern)
+            ]
+        )
+        
+        query_job = bq_client.query(query, job_config=job_config)
         results = list(query_job.result())
         
         if not results:
@@ -580,9 +579,9 @@ def search_with_keywords(question_normalized: str, question_types: List[str]) ->
         for row in results[:15]:  # Evaluasi top 15 candidates
             score = calculate_text_similarity(question_normalized, row.question_normalized)
             
-            # Beri bonus untuk matches dengan keyword lebih banyak
-            keyword_bonus = row.keyword_matches * 0.1
-            final_score = score + keyword_bonus
+            # Beri bonus untuk skor search yang lebih tinggi
+            search_bonus = row.search_score * 0.05
+            final_score = score + search_bonus
             
             if final_score > best_score:
                 best_score = final_score
@@ -602,32 +601,18 @@ def search_with_keywords(question_normalized: str, question_types: List[str]) ->
 # OCR FUNCTIONS
 # =======================
 
-def ocr_with_google_vision(image_content: bytes) -> str:
-    """OCR dengan Google Cloud Vision API"""
+def ocr_with_ocr_space(image_content: bytes) -> str:
+    """OCR dengan OCR.Space API"""
     try:
-        image = vision.Image(content=image_content)
-        response = vision_client.document_text_detection(image=image)
-        
-        if response.error.message:
-            logger.error(f"Error OCR: {response.error.message}")
+        if not image_content or len(image_content) < 100:
+            logger.warning("Ukuran gambar terlalu kecil untuk OCR")
             return ""
         
-        raw_text = response.text_annotations[0].text if response.text_annotations else ""
-        cleaned_text = clean_ocr_text(raw_text)
-        logger.info(f"Google Vision OCR: '{raw_text[:100]}...' -> '{cleaned_text[:100]}...'")
-        return cleaned_text
-    except Exception as e:
-        logger.error(f"Error dalam Google Vision OCR: {e}")
-        return ""
-
-def ocr_with_ocr_space(image_content: bytes) -> str:
-    """OCR dengan OCR.Space API sebagai fallback"""
-    try:
         with NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
             temp_file.write(image_content)
             temp_file_path = temp_file.name
         
-        # Perbaikan: gunakan language code yang valid untuk OCR.Space
+        # Gunakan language code yang valid untuk OCR.Space
         payload = {
             'isOverlayRequired': False,
             'apikey': OCR_SPACE_API_KEY,
@@ -994,20 +979,15 @@ async def cari_jawaban_gambar(update: Update, context: ContextTypes.DEFAULT_TYPE
         file = await context.bot.get_file(photo.file_id)
         file_bytes = await file.download_as_bytearray()
         
-        # OCR dengan Google Vision dulu
-        ocr_text = ocr_with_google_vision(bytes(file_bytes))
-        
-        # Fallback ke OCR.Space jika gagal
-        if not ocr_text or len(ocr_text.strip()) < 3:
-            logger.info("Google Vision gagal, mencoba OCR.Space")
-            ocr_text = ocr_with_ocr_space(bytes(file_bytes))
+        # Gunakan OCR.Space saja
+        ocr_text = ocr_with_ocr_space(bytes(file_bytes))
             
-            if not ocr_text or len(ocr_text.strip()) < 3:
-                await update.message.reply_text(
-                    "❌ Tidak dapat membaca teks dari gambar.\n"
-                    "Pastikan gambar jelas dan berisi teks yang dapat dibaca."
-                )
-                return
+        if not ocr_text or len(ocr_text.strip()) < 3:
+            await update.message.reply_text(
+                "❌ Tidak dapat membaca teks dari gambar.\n"
+                "Pastikan gambar jelas dan berisi teks yang dapat dibaca."
+            )
+            return
         
         logger.info(f"OCR hasil: '{ocr_text}'")
         
@@ -1052,17 +1032,12 @@ async def ocr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(photo.file_id)
         file_bytes = await file.download_as_bytearray()
         
-        # OCR dengan Google Vision dulu
-        ocr_text = ocr_with_google_vision(bytes(file_bytes))
-        
-        # Fallback ke OCR.Space jika gagal
-        if not ocr_text:
-            logger.info("Google Vision gagal, mencoba OCR.Space")
-            ocr_text = ocr_with_ocr_space(bytes(file_bytes))
+        # Gunakan OCR.Space saja
+        ocr_text = ocr_with_ocr_space(bytes(file_bytes))
             
-            if not ocr_text:
-                await update.message.reply_text("❌ Tidak dapat membaca teks dari gambar.")
-                return
+        if not ocr_text:
+            await update.message.reply_text("❌ Tidak dapat membaca teks dari gambar.")
+            return
         
         await update.message.reply_text(f"📄 Hasil OCR:\n\n{ocr_text}")
         
@@ -1263,4 +1238,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
