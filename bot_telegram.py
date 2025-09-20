@@ -12,6 +12,7 @@ from collections import Counter
 import math
 import requests
 import unicodedata
+from difflib import SequenceMatcher
 
 from google.cloud import bigquery
 from google.cloud import vision
@@ -39,230 +40,252 @@ OCR_SPACE_API_KEY = "K84451990188957"
 bq_client = None
 vision_client = None
 
-# Daftar stopwords (kata umum yang diabaikan) - Perbaikan: tambahkan lebih banyak stopwords
+# Stopwords yang disederhanakan - hanya kata yang benar-benar tidak penting
 STOPWORDS = {
-    'yang', 'dan', 'di', 'ke', 'dari', 'pada', 'adalah', 'itu', 'dengan', 
-    'untuk', 'tidak', 'ini', 'dalam', 'akan', 'juga', 'atau', 'karena',
-    'seperti', 'jika', 'saya', 'anda', 'kami', 'mereka', 'ada', 'bisa',
-    'dapat', 'lebih', 'sudah', 'belum', 'yaitu', 'yakni', 'ialah', 
-    'merupakan', 'tersebut', 'tersebutlah', 'oleh', 'sebuah', 'sebagai',
-    'agar', 'supaya', 'hingga', 'sampai', 'setelah', 'sebelum', 'ketika',
-    'dimana', 'kemana', 'darimana', 'bagaimana', 'mengapa', 'kapan',
-    'siapa', 'apa', 'berapa', 'berapa banyak', 'berapa lama'
+    'adalah', 'itu', 'ini', 'tersebut', 'oleh', 'sebuah', 'sebagai',
+    'agar', 'supaya', 'bahwa', 'akan', 'sudah', 'telah', 'sedang'
 }
 
-# Kata kunci penting yang sebaiknya tidak dihapus
-IMPORTANT_KEYWORDS = {
-    'tidak', 'bukan', 'kecuali', 'selain', 'hanya', 'cuma', 'melainkan'
+# Kata penting yang tidak boleh dihapus (termasuk negasi dan preposisi)
+IMPORTANT_WORDS = {
+    'tidak', 'bukan', 'kecuali', 'selain', 'hanya', 'cuma', 'melainkan',
+    'yang', 'dan', 'di', 'ke', 'dari', 'pada', 'dengan', 'untuk', 
+    'dalam', 'juga', 'atau', 'karena', 'seperti', 'jika', 'ya', 'no'
+}
+
+# Pola kata tanya untuk deteksi tipe pertanyaan
+QUESTION_PATTERNS = {
+    'siapa': ['siapa', 'siapakah'],
+    'apa': ['apa', 'apakah'],
+    'kapan': ['kapan', 'kapankah'],
+    'dimana': ['dimana', 'di mana', 'kemana', 'ke mana'],
+    'mengapa': ['mengapa', 'kenapa', 'kenapa', 'why'],
+    'bagaimana': ['bagaimana', 'gimana', 'how'],
+    'berapa': ['berapa', 'berapa banyak', 'berapa jumlah'],
+    'manakah': ['yang mana', 'manakah', 'mana'],
+    'kecuali': ['kecuali', 'bukan', 'tidak termasuk', 'selain', 'except']
 }
 
 # =======================
-# 🔑 SETUP BIGQUERY & GOOGLE VISION
+# SETUP BIGQUERY & GOOGLE VISION
 # =======================
 
 def initialize_services():
     """Inisialisasi BigQuery dan Google Vision Client"""
     global bq_client, vision_client
     try:
-        # Gunakan environment variable untuk service account
         service_account_info = os.getenv("SERVICE_ACCOUNT_JSON")
         if service_account_info:
-            # Simpan ke file sementara
             with NamedTemporaryFile(mode='w', delete=False, suffix='.json') as temp_file:
                 json.dump(json.loads(service_account_info), temp_file)
                 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_file.name
         else:
             logger.warning("SERVICE_ACCOUNT_JSON tidak ditemukan di environment variables")
         
-        # Inisialisasi clients
         bq_client = bigquery.Client(project=PROJECT_ID)
         vision_client = vision.ImageAnnotatorClient()
         logger.info("BigQuery dan Vision clients berhasil diinisialisasi")
         
         # Test koneksi BigQuery
-        try:
-            test_query = f"SELECT COUNT(*) as count FROM `{TABLE_REF}`"
-            query_job = bq_client.query(test_query)
-            results = list(query_job.result())
-            logger.info(f"Test koneksi BigQuery berhasil. Jumlah data: {results[0].count}")
-        except Exception as e:
-            logger.error(f"Test koneksi BigQuery gagal: {e}")
+        test_query = f"SELECT COUNT(*) as count FROM `{TABLE_REF}` LIMIT 1"
+        query_job = bq_client.query(test_query)
+        results = list(query_job.result())
+        logger.info(f"Test koneksi BigQuery berhasil. Jumlah data: {results[0].count}")
             
         return bq_client, vision_client
     except Exception as e:
         logger.error(f"Gagal menginisialisasi services: {e}")
         raise
 
-def normalize_text(text: str) -> str:
-    """Normalisasi teks: hapus tanda baca dan spasi berlebih, tetapi pertahankan kata penting"""
+def clean_text(text: str) -> str:
+    """Pembersihan teks yang lebih hati-hati"""
     try:
-        # Konversi ke bentuk unicode NFKD untuk menangani karakter khusus
-        normalized = unicodedata.normalize('NFKD', text)
+        if not text or not text.strip():
+            return ""
+            
+        # Normalisasi unicode
+        text = unicodedata.normalize('NFKD', text)
         
-        # Hapus tanda baca kecuali yang penting untuk konteks (seperti ?)
-        # Pertahankan tanda tanya untuk pertanyaan
-        normalized = re.sub(r'[^\w\s\?]', ' ', normalized)
+        # Hapus karakter control dan non-printable
+        text = ''.join(char for char in text if char.isprintable() or char.isspace())
         
-        # Hapus spasi berlebih (ganti multiple spasi dengan satu spasi)
-        normalized = re.sub(r'\s+', ' ', normalized)
+        # Standardisasi spasi
+        text = re.sub(r'\s+', ' ', text)
         
-        # Ubah ke lowercase
-        normalized = normalized.lower()
-        
-        # Hapus spasi di awal dan akhir
-        result = normalized.strip()
-        
-        logger.info(f"Normalisasi teks: '{text}' -> '{result}'")
-        return result
+        # Hapus leading/trailing whitespace
+        return text.strip()
     except Exception as e:
-        logger.error(f"Error normalisasi teks: {e}")
-        return text.lower().strip()
+        logger.error(f"Error cleaning text: {e}")
+        return str(text).strip() if text else ""
+
+def normalize_for_search(text: str) -> str:
+    """Normalisasi sesuai dengan format data di database (tanpa tanda baca dan spasi tunggal)"""
+    try:
+        text = clean_text(text)
+        if not text:
+            return ""
+        
+        # Ke lowercase
+        text = text.lower()
+        
+        # Standardisasi kontraksi umum
+        replacements = {
+            'gimana': 'bagaimana',
+            'kenapa': 'mengapa',
+            'kapankah': 'kapan',
+            'siapakah': 'siapa',
+            'apakah': 'apa'
+        }
+        
+        for old, new in replacements.items():
+            text = re.sub(rf'\b{old}\b', new, text)
+        
+        # Hapus SEMUA tanda baca untuk menyesuaikan dengan format database
+        text = re.sub(r'[^\w\s]', ' ', text)
+        
+        # Normalisasi spasi menjadi spasi tunggal
+        text = re.sub(r'\s+', ' ', text).strip()
+        
+        return text
+    except Exception as e:
+        logger.error(f"Error normalizing text: {e}")
+        return clean_text(text).lower()
+
+def extract_keywords(text: str) -> List[str]:
+    """Ekstrak kata kunci dengan pendekatan yang lebih baik"""
+    try:
+        normalized = normalize_for_search(text)
+        if not normalized:
+            return []
+        
+        words = normalized.split()
+        keywords = []
+        
+        for word in words:
+            word = word.strip('.,!?-')
+            
+            # Pertahankan kata penting meskipun pendek
+            if word in IMPORTANT_WORDS:
+                keywords.append(word)
+            # Pertahankan kata yang cukup panjang dan bukan stopword
+            elif len(word) >= 2 and word not in STOPWORDS:
+                keywords.append(word)
+        
+        return keywords
+    except Exception as e:
+        logger.error(f"Error extracting keywords: {e}")
+        return []
+
+def calculate_text_similarity(text1: str, text2: str) -> float:
+    """Hitung similarity untuk teks tanpa tanda baca (sesuai format database)"""
+    try:
+        # Kedua teks sudah dalam format normalized (tanpa tanda baca)
+        if not text1 or not text2:
+            return 0.0
+        
+        # 1. Exact match check dulu
+        if text1 == text2:
+            return 1.0
+        
+        # 2. Sequence similarity untuk keseluruhan
+        seq_similarity = SequenceMatcher(None, text1, text2).ratio()
+        
+        # 3. Word-level similarity
+        words1 = text1.split()
+        words2 = text2.split()
+        
+        if not words1 or not words2:
+            return seq_similarity * 0.3
+        
+        # Hitung word overlap
+        set1, set2 = set(words1), set(words2)
+        intersection = len(set1 & set2)
+        union = len(set1 | set2)
+        word_similarity = intersection / union if union > 0 else 0.0
+        
+        # 4. Length similarity (penalti untuk perbedaan panjang yang ekstrem)
+        len_ratio = min(len(words1), len(words2)) / max(len(words1), len(words2))
+        
+        # 5. Important word bonus
+        important_matches = (set1 & set2) & {word.replace(',', '').replace('.', '') for word in IMPORTANT_WORDS}
+        important_bonus = len(important_matches) * 0.15
+        
+        # Weighted combination
+        final_score = (seq_similarity * 0.2) + (word_similarity * 0.6) + (len_ratio * 0.2) + important_bonus
+        
+        return min(final_score, 1.0)
+    except Exception as e:
+        logger.error(f"Error calculating similarity: {e}")
+        return 0.0
+
+def detect_question_type(question: str) -> List[str]:
+    """Deteksi tipe pertanyaan dengan lebih akurat"""
+    normalized = normalize_for_search(question)
+    detected_types = []
+    
+    for q_type, patterns in QUESTION_PATTERNS.items():
+        for pattern in patterns:
+            if pattern in normalized:
+                detected_types.append(q_type)
+                break
+    
+    return detected_types
 
 def clean_ocr_text(text: str) -> str:
-    """Membersihkan teks hasil OCR dari format tambahan seperti timestamp"""
+    """Pembersihan khusus untuk teks hasil OCR"""
     try:
-        # Hapus timestamp di awal (format HH:MM)
-        cleaned = re.sub(r'^\d{1,2}:\d{2}\s*', '', text)
+        if not text:
+            return ""
         
-        # Hapus karakter khusus yang tidak perlu
-        cleaned = re.sub(r'[^\w\s\?\.\,\!\-\:]', ' ', cleaned)
+        # Hapus timestamp di awal (format HH:MM atau H:MM)
+        text = re.sub(r'^\d{1,2}:\d{2}\s*', '', text)
         
-        # Hapus spasi berlebih
-        cleaned = re.sub(r'\s+', ' ', cleaned)
+        # Hapus prefix pertanyaan yang umum
+        text = re.sub(r'^(Q:|Pertanyaan:|Soal:|Question:)\s*', '', text, flags=re.IGNORECASE)
         
-        return cleaned.strip()
+        # Perbaiki karakter OCR yang sering salah
+        ocr_corrections = {
+            r'\b0\b': 'O',  # Angka 0 -> huruf O
+            r'\bl\b': 'I',  # huruf l -> huruf I
+            r'rn': 'm',     # rn -> m
+            r'cl': 'd',     # cl -> d
+        }
+        
+        for pattern, replacement in ocr_corrections.items():
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+        
+        return clean_text(text)
     except Exception as e:
-        logger.error(f"Error membersihkan teks OCR: {e}")
-        return text
-
-def get_keywords(text: str) -> List[str]:
-    """Ekstrak kata kunci dari teks dengan mempertimbangkan kata penting"""
-    # Normalisasi teks terlebih dahulu
-    normalized_text = normalize_text(text)
-    words = normalized_text.split()
-    keywords = []
-    
-    for word in words:
-        # Pertahankan kata penting meskipun termasuk stopwords
-        if word in IMPORTANT_KEYWORDS:
-            keywords.append(word)
-        elif word not in STOPWORDS and len(word) > 2:
-            keywords.append(word)
-    
-    return keywords
-
-def calculate_similarity(query: str, document: str) -> float:
-    """Hitung kemiripan yang lebih baik antara query dan document menggunakan TF-IDF-like approach"""
-    # Normalisasi keduanya sebelum perbandingan
-    normalized_query = normalize_text(query)
-    normalized_document = normalize_text(document)
-    
-    query_words = get_keywords(normalized_query)
-    doc_words = get_keywords(normalized_document)
-    
-    if not query_words or not doc_words:
-        return 0.0
-    
-    # Hitung frekuensi kata
-    query_freq = Counter(query_words)
-    doc_freq = Counter(doc_words)
-    
-    # Hitung skor kemiripan dengan mempertimbangkan frekuensi
-    intersection_score = 0
-    for word in set(query_words):
-        if word in doc_words:
-            # Beri bobot lebih untuk kata yang jarang muncul
-            word_score = (1 + math.log(query_freq[word] + 1)) * (1 + math.log(doc_freq[word] + 1))
-            intersection_score += word_score
-    
-    # Normalisasi skor
-    query_norm = math.sqrt(sum([(1 + math.log(freq + 1))**2 for freq in query_freq.values()]))
-    doc_norm = math.sqrt(sum([(1 + math.log(freq + 1))**2 for freq in doc_freq.values()]))
-    
-    if query_norm == 0 or doc_norm == 0:
-        return 0.0
-    
-    # Cosine similarity
-    similarity = intersection_score / (query_norm * doc_norm)
-    
-    # Beri bonus untuk kata kunci penting yang cocok
-    important_matches = set(query_words) & set(doc_words) & IMPORTANT_KEYWORDS
-    if important_matches:
-        similarity += 0.2  # Bonus 20% untuk kata penting yang cocok
-    
-    return min(similarity, 1.0)  # Pastikan skor tidak melebihi 1.0
-
-def is_except_question(question: str) -> bool:
-    """Mendeteksi apakah pertanyaan mengandung kata 'kecuali' atau negasi"""
-    # Normalisasi pertanyaan sebelum pengecekan
-    normalized_question = normalize_text(question)
-    except_keywords = ['kecuali', 'bukan', 'tidak termasuk', 'selain', 'bukan termasuk']
-    return any(keyword in normalized_question for keyword in except_keywords)
-
-def is_question_type(question: str, question_type: str) -> bool:
-    """Mendeteksi tipe pertanyaan berdasarkan kata kunci"""
-    normalized_question = normalize_text(question)
-    
-    question_types = {
-        'who': ['siapa', 'siapakah', 'nama siapa'],
-        'what': ['apa', 'apakah', 'gimana', 'bagaimana'],
-        'when': ['kapan', 'kapankah', 'kapan saja'],
-        'where': ['dimana', 'di mana', 'kemana'],
-        'why': ['mengapa', 'kenapa'],
-        'how': ['bagaimana', 'gimana cara', 'bagaimana cara'],
-        'how_many': ['berapa', 'berapa banyak', 'berapa jumlah'],
-        'which': ['yang mana', 'manakah'],
-        'yes_no': ['apakah', 'benarkah', 'betulkah'],
-        'except': ['kecuali', 'bukan', 'tidak termasuk', 'selain']
-    }
-    
-    if question_type in question_types:
-        keywords = question_types[question_type]
-        return any(keyword in normalized_question for keyword in keywords)
-    
-    return False
-
-def handle_short_questions(question: str) -> Optional[str]:
-    """Menangani pertanyaan singkat yang umum"""
-    # Normalisasi pertanyaan sebelum pencocokan
-    normalized_question = normalize_text(question)
-    
-    # Daftar pertanyaan singkat dan jawabannya
-    short_answers = {
-        "nama saya adalah": "muhammad alrafka firdaus",
-        "siapa nama saya": "muhammad alrafka firdaus",
-        "nama saya": "muhammad alrafka firdaus",
-        # Tambahkan pertanyaan singkat lainnya di sini
-    }
-    
-    # Cocokkan dengan versi normalisasi
-    for key, value in short_answers.items():
-        if normalize_text(key) == normalized_question:
-            return value
-    
-    return None
+        logger.error(f"Error cleaning OCR text: {e}")
+        return clean_text(text)
 
 # =======================
-# ⚙️ FUNGSI UTAMA
+# FUNGSI DATABASE
 # =======================
 
 def simpan_soal(question: str, answer: str, source: str = "manual") -> bool:
-    """Simpan soal ke BigQuery dengan struktur tabel baru"""
+    """Simpan soal ke BigQuery dengan validasi yang lebih baik"""
     try:
-        question, answer = str(question).strip(), str(answer).strip()
-        if not question or not answer:
-            logger.warning("Soal atau jawaban kosong, tidak disimpan")
+        question = clean_text(str(question))
+        answer = clean_text(str(answer))
+        
+        if not question or not answer or len(question) < 3:
+            logger.warning(f"Soal tidak valid: question='{question}', answer='{answer}'")
             return False
 
-        # Normalisasi pertanyaan
-        question_normalized = normalize_text(question)
+        question_normalized = normalize_for_search(question)
+        
+        if not question_normalized:
+            logger.warning("Question normalized kosong")
+            return False
 
-        # Cek duplikat berdasarkan question_normalized
-        query = f"""
+        # Cek duplikat dengan query yang lebih efisien
+        query = """
         SELECT COUNT(*) as count 
-        FROM `{TABLE_REF}` 
+        FROM `{0}` 
         WHERE question_normalized = @question_normalized
-        """
+        LIMIT 1
+        """.format(TABLE_REF)
         
         job_config = bigquery.QueryJobConfig(
             query_parameters=[
@@ -274,10 +297,10 @@ def simpan_soal(question: str, answer: str, source: str = "manual") -> bool:
         result = list(query_job.result())[0]
         
         if result.count > 0:
-            logger.info("Soal sudah ada di database, tidak disimpan lagi")
+            logger.info("Soal sudah ada di database")
             return False
 
-        # Insert data baru dengan struktur tabel baru
+        # Insert data baru
         rows_to_insert = [{
             "id": str(uuid.uuid4()),
             "question": question,
@@ -292,41 +315,212 @@ def simpan_soal(question: str, answer: str, source: str = "manual") -> bool:
             logger.error(f"Error inserting row: {errors}")
             return False
         
-        logger.info("Soal berhasil disimpan ke database")
+        logger.info(f"Soal berhasil disimpan: {question[:50]}...")
         return True
     except Exception as e:
         logger.error(f"Error menyimpan soal: {e}")
         return False
 
-def parse_qa_text(text: str) -> List[Tuple[str, str]]:
-    """Parse teks untuk mengekstrak soal dan jawaban"""
-    questions_answers = []
+def find_answer_from_question(question: str) -> str:
+    """Pencarian jawaban dengan algoritma yang diperbaiki"""
     try:
-        # Pattern untuk mendeteksi format Q: dan A:
-        pattern = r'(?i)(Q:|Pertanyaan:|Soal:)\s*(.*?)(?=(?:A:|Jawaban:|$))(?:\s*(?:A:|Jawaban:)\s*(.*))?'
-        matches = re.findall(pattern, text, re.DOTALL)
+        if bq_client is None:
+            logger.error("BigQuery client tidak tersedia")
+            return "Database tidak tersedia. Silakan coba lagi nanti."
         
-        for match in matches:
-            question = match[1].strip()
-            answer = match[2].strip() if len(match) > 2 and match[2] else ""
-            
-            if question and answer:
-                questions_answers.append((question, answer))
+        question = clean_text(question)
+        if len(question) < 2:
+            return "Pertanyaan terlalu pendek. Silakan berikan pertanyaan yang lebih lengkap."
         
-        # Jika tidak ada pattern Q:A, coba split dengan baris baru
-        if not questions_answers and "\n" in text:
-            lines = text.split("\n")
-            for i in range(len(lines)-1):
-                if lines[i].strip() and lines[i+1].strip():
-                    questions_answers.append((lines[i].strip(), lines[i+1].strip()))
-    
+        question_normalized = normalize_for_search(question)
+        logger.info(f"Mencari jawaban untuk: '{question}' -> normalized: '{question_normalized}'")
+        
+        # Deteksi tipe pertanyaan
+        question_types = detect_question_type(question)
+        logger.info(f"Tipe pertanyaan: {question_types}")
+        
+        # FASE 1: Exact Match
+        exact_answer = search_exact_match(question_normalized)
+        if exact_answer:
+            logger.info("Ditemukan exact match")
+            return exact_answer
+        
+        # FASE 2: Fuzzy Search dengan Similarity
+        fuzzy_answer = search_with_similarity(question_normalized, threshold=0.7)
+        if fuzzy_answer:
+            logger.info("Ditemukan dengan fuzzy search (high threshold)")
+            return fuzzy_answer
+        
+        # FASE 3: Keyword-based Search
+        keyword_answer = search_with_keywords(question_normalized, question_types)
+        if keyword_answer:
+            logger.info("Ditemukan dengan keyword search")
+            return keyword_answer
+        
+        # FASE 4: Lowered threshold fuzzy search
+        fuzzy_answer_low = search_with_similarity(question_normalized, threshold=0.5)
+        if fuzzy_answer_low:
+            logger.info("Ditemukan dengan fuzzy search (low threshold)")
+            return fuzzy_answer_low
+        
+        logger.info("Jawaban tidak ditemukan di database")
+        return "Jawaban tidak ditemukan. Coba reformulasi pertanyaan Anda atau periksa ejaan."
+                
     except Exception as e:
-        logger.error(f"Error parsing teks: {e}")
-    
-    return questions_answers
+        logger.error(f"Error mencari jawaban: {e}", exc_info=True)
+        return "Terjadi kesalahan saat mencari jawaban. Silakan coba lagi nanti."
+
+def search_exact_match(question_normalized: str) -> Optional[str]:
+    """Pencarian exact match"""
+    try:
+        query = """
+        SELECT answer 
+        FROM `{0}` 
+        WHERE question_normalized = @question_normalized
+        LIMIT 1
+        """.format(TABLE_REF)
+        
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("question_normalized", "STRING", question_normalized)
+            ]
+        )
+        
+        query_job = bq_client.query(query, job_config=job_config)
+        results = list(query_job.result())
+        
+        return results[0].answer if results else None
+    except Exception as e:
+        logger.error(f"Error dalam exact match search: {e}")
+        return None
+
+def search_with_similarity(question_normalized: str, threshold: float = 0.7) -> Optional[str]:
+    """Pencarian dengan similarity scoring - optimized untuk database besar"""
+    try:
+        # Ekstrak kata kunci untuk pre-filtering
+        keywords = extract_keywords(question_normalized)
+        if not keywords:
+            return None
+        
+        # Ambil kata kunci terpanjang untuk filtering awal
+        main_keywords = [kw for kw in keywords if len(kw) >= 3]
+        if not main_keywords:
+            main_keywords = keywords[:2]  # Fallback ke 2 kata pertama
+        
+        # Pre-filter dengan kata kunci untuk mengurangi dataset
+        conditions = []
+        for kw in main_keywords[:3]:  # Maksimal 3 kata kunci utama
+            conditions.append(f"question_normalized LIKE '%{kw}%'")
+        
+        where_clause = " OR ".join(conditions)
+        
+        query = f"""
+        SELECT answer, question_normalized 
+        FROM `{TABLE_REF}`
+        WHERE {where_clause}
+        LIMIT 200
+        """
+        
+        query_job = bq_client.query(query)
+        results = list(query_job.result())
+        
+        if not results:
+            return None
+        
+        best_match = None
+        best_score = 0
+        
+        # Evaluasi similarity untuk kandidat yang sudah difilter
+        for row in results:
+            score = calculate_text_similarity(question_normalized, row.question_normalized)
+            
+            if score > best_score and score >= threshold:
+                best_score = score
+                best_match = row.answer
+                logger.debug(f"New best match: score={best_score:.3f}")
+        
+        if best_match:
+            logger.info(f"Found similarity match with score: {best_score:.3f}")
+        
+        return best_match
+    except Exception as e:
+        logger.error(f"Error dalam similarity search: {e}")
+        return None
+
+def search_with_keywords(question_normalized: str, question_types: List[str]) -> Optional[str]:
+    """Pencarian berdasarkan kata kunci"""
+    try:
+        keywords = extract_keywords(question_normalized)
+        
+        if not keywords:
+            return None
+        
+        # Prioritaskan kata kunci yang lebih panjang
+        important_keywords = [kw for kw in keywords if len(kw) >= 3]
+        if len(important_keywords) < len(keywords):
+            important_keywords.extend([kw for kw in keywords if len(kw) == 2])
+        
+        # Ambil maksimal 5 kata kunci terpenting
+        search_keywords = important_keywords[:5]
+        
+        logger.info(f"Searching dengan keywords: {search_keywords}")
+        
+        # Buat query dengan REGEXP untuk pencarian yang lebih fleksibel
+        keyword_patterns = []
+        for kw in search_keywords:
+            keyword_patterns.append(f"question_normalized LIKE '%{kw}%'")
+        
+        # Gunakan OR untuk mendapat lebih banyak hasil
+        where_clause = " OR ".join(keyword_patterns)
+        
+        query = f"""
+        SELECT answer, question_normalized,
+               (
+                   {" + ".join([f"CASE WHEN question_normalized LIKE '%{kw}%' THEN 1 ELSE 0 END" for kw in search_keywords])}
+               ) as keyword_matches
+        FROM `{TABLE_REF}`
+        WHERE {where_clause}
+        ORDER BY keyword_matches DESC
+        LIMIT 20
+        """
+        
+        query_job = bq_client.query(query)
+        results = list(query_job.result())
+        
+        if not results:
+            return None
+        
+        # Hitung similarity untuk kandidat terbaik
+        best_match = None
+        best_score = 0
+        
+        for row in results[:10]:  # Evaluasi top 10 candidates
+            score = calculate_text_similarity(question_normalized, row.question_normalized)
+            
+            # Beri bonus untuk matches dengan keyword lebih banyak
+            keyword_bonus = row.keyword_matches * 0.1
+            final_score = score + keyword_bonus
+            
+            if final_score > best_score:
+                best_score = final_score
+                best_match = row.answer
+        
+        # Threshold lebih rendah untuk keyword search
+        if best_match and best_score >= 0.4:
+            logger.info(f"Found keyword match with score: {best_score:.3f}")
+            return best_match
+        
+        return None
+    except Exception as e:
+        logger.error(f"Error dalam keyword search: {e}")
+        return None
+
+# =======================
+# OCR FUNCTIONS
+# =======================
 
 def ocr_with_google_vision(image_content: bytes) -> str:
-    """Melakukan OCR pada gambar menggunakan Google Cloud Vision API"""
+    """OCR dengan Google Cloud Vision API"""
     try:
         image = vision.Image(content=image_content)
         response = vision_client.document_text_detection(image=image)
@@ -336,571 +530,405 @@ def ocr_with_google_vision(image_content: bytes) -> str:
             return ""
         
         raw_text = response.text_annotations[0].text if response.text_annotations else ""
-        # Bersihkan teks hasil OCR
         cleaned_text = clean_ocr_text(raw_text)
-        logger.info(f"OCR raw: '{raw_text}' -> cleaned: '{cleaned_text}'")
+        logger.info(f"Google Vision OCR: '{raw_text[:100]}...' -> '{cleaned_text[:100]}...'")
         return cleaned_text
     except Exception as e:
-        logger.error(f"Error dalam OCR: {e}")
+        logger.error(f"Error dalam Google Vision OCR: {e}")
         return ""
 
 def ocr_with_ocr_space(image_content: bytes) -> str:
-    """Melakukan OCR pada gambar menggunakan OCR.Space API sebagai fallback"""
+    """OCR dengan OCR.Space API sebagai fallback"""
     try:
-        # Buat file temporary untuk gambar
         with NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
             temp_file.write(image_content)
             temp_file_path = temp_file.name
         
-        # Siapkan payload untuk OCR.Space
         payload = {
             'isOverlayRequired': False,
             'apikey': OCR_SPACE_API_KEY,
-            'language': 'ind',  # Perbaikan: gunakan 'ind' untuk Bahasa Indonesia
+            'language': 'ind',
+            'OCREngine': 2  # Gunakan engine yang lebih baik
         }
         
-        # Siapkan file untuk diupload
         with open(temp_file_path, 'rb') as f:
-            files = {
-                'file': (temp_file_path, f, 'image/jpeg')
-            }
-            
-            # Kirim request ke OCR.Space
+            files = {'file': (temp_file_path, f, 'image/jpeg')}
             response = requests.post(
                 'https://api.ocr.space/parse/image',
                 files=files,
-                data=payload
+                data=payload,
+                timeout=30
             )
         
-        # Hapus file temporary
         os.unlink(temp_file_path)
         
-        # Parse response
         result = response.json()
         
-        if result.get('OCRExitCode') == 1:  # Sukses
+        if result.get('OCRExitCode') == 1:
             parsed_results = result.get('ParsedResults', [])
             if parsed_results:
                 raw_text = parsed_results[0].get('ParsedText', '')
-                # Bersihkan teks hasil OCR
                 cleaned_text = clean_ocr_text(raw_text)
-                logger.info(f"OCR.Space raw: '{raw_text}' -> cleaned: '{cleaned_text}'")
+                logger.info(f"OCR.Space: '{raw_text[:100]}...' -> '{cleaned_text[:100]}...'")
                 return cleaned_text
         else:
             logger.error(f"OCR.Space error: {result.get('ErrorMessage', 'Unknown error')}")
-            return ""
             
         return ""
     except Exception as e:
         logger.error(f"Error dalam OCR.Space: {e}")
         return ""
 
+# =======================
+# CSV PROCESSING
+# =======================
+
 def find_question_answer_columns(headers: List[str]) -> Tuple[List[int], List[int]]:
-    """Mencari indeks kolom yang mengandung 'question' dan 'answer' dalam header"""
+    """Cari kolom pertanyaan dan jawaban di CSV"""
     question_indices = []
     answer_indices = []
     
     for i, header in enumerate(headers):
-        header_lower = header.lower()
-        if any(keyword in header_lower for keyword in ['question', 'soal', 'pertanyaan']):
+        header_lower = header.lower().strip()
+        if any(keyword in header_lower for keyword in ['question', 'soal', 'pertanyaan', 'ask']):
             question_indices.append(i)
-        if any(keyword in header_lower for keyword in ['answer', 'jawaban', 'kunci']):
+        if any(keyword in header_lower for keyword in ['answer', 'jawaban', 'kunci', 'solusi', 'solution']):
             answer_indices.append(i)
     
     return question_indices, answer_indices
 
-def find_answer_from_question(question: str) -> str:
-    """Mencari jawaban dari database berdasarkan pertanyaan dengan pendekatan bertahap yang diperbaiki"""
-    try:
-        # Periksa koneksi database
-        if bq_client is None:
-            logger.error("BigQuery client tidak tersedia")
-            return "Maaf, database sedang tidak tersedia. Silakan coba lagi nanti."
-        
-        # Normalisasi pertanyaan (hapus semua tanda baca dan spasi berlebih)
-        question_normalized = normalize_text(question)
-        logger.info(f"Pertanyaan setelah normalisasi: '{question_normalized}'")
-        
-        # Cek dulu apakah pertanyaan termasuk pertanyaan singkat
-        short_answer = handle_short_questions(question_normalized)
-        if short_answer:
-            return short_answer
-        
-        # Validasi panjang pertanyaan
-        if len(question_normalized) < 2:
-            logger.warning(f"Pertanyaan terlalu pendek: '{question}' -> '{question_normalized}'")
-            return "Pertanyaan terlalu pendek. Silakan berikan pertanyaan yang lebih lengkap."
-        
-        logger.info(f"Mencari jawaban untuk: '{question}' (normalized: '{question_normalized}')")
-        
-        # Deteksi tipe pertanyaan
-        question_types = []
-        for q_type in ['who', 'what', 'when', 'where', 'why', 'how', 'how_many', 'which', 'yes_no', 'except']:
-            if is_question_type(question, q_type):
-                question_types.append(q_type)
-        
-        logger.info(f"Tipe pertanyaan terdeteksi: {question_types}")
-        
-        # Langkah 1: Cari exact match di question_normalized
-        try:
-            query = """
-            SELECT answer 
-            FROM `{0}` 
-            WHERE question_normalized = @question_normalized
-            LIMIT 1
-            """.format(TABLE_REF)
-            
-            job_config = bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ScalarQueryParameter("question_normalized", "STRING", question_normalized)
-                ]
-            )
-            
-            query_job = bq_client.query(query, job_config=job_config)
-            results = list(query_job.result())
-            
-            if results:
-                logger.info("Ditemukan exact match di question_normalized")
-                return results[0].answer
-        except Exception as e:
-            logger.error(f"Error pada query exact match question_normalized: {e}")
-        
-        # Langkah 2: Jika tidak ditemukan, coba dengan normalisasi alternatif
-        try:
-            # Normalisasi alternatif: hapus semua karakter non-alfanumerik termasuk spasi
-            alt_normalized = re.sub(r'[^a-zA-Z0-9]', '', question_normalized)
-            logger.info(f"Normalisasi alternatif: '{alt_normalized}'")
-            
-            query = """
-            SELECT answer, question_normalized
-            FROM `{0}` 
-            WHERE REPLACE(REPLACE(question_normalized, ' ', ''), '_', '') = @alt_normalized
-            LIMIT 1
-            """.format(TABLE_REF)
-            
-            job_config = bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ScalarQueryParameter("alt_normalized", "STRING", alt_normalized)
-                ]
-            )
-            
-            query_job = bq_client.query(query, job_config=job_config)
-            results = list(query_job.result())
-            
-            if results:
-                logger.info("Ditemukan exact match dengan normalisasi alternatif")
-                return results[0].answer
-        except Exception as e:
-            logger.error(f"Error pada query normalisasi alternatif: {e}")
-        
-        # Langkah 3: Jika masih tidak ditemukan, lakukan fuzzy search dengan LIKE
-        try:
-            # Ambil kata-kata kunci dari pertanyaan yang sudah dinormalisasi
-            keywords = get_keywords(question_normalized)
-            if not keywords:
-                raise ValueError("No keywords found after normalization")
-            
-            logger.info(f"Kata kunci untuk pencarian fuzzy: {keywords}")
-            
-            # Untuk pertanyaan 'kecuali', kita perlu pendekatan berbeda
-            if 'except' in question_types:
-                # Cari semua jawaban yang tidak mengandung kata kunci tertentu
-                # atau yang sesuai dengan pola pertanyaan kecuali
-                logger.info("Menggunakan strategi pencarian untuk pertanyaan 'kecuali'")
-                
-                # Ambil semua kata kunci kecuali kata 'kecuali' itu sendiri
-                except_keywords = [kw for kw in keywords if kw not in ['kecuali', 'bukan', 'selain']]
-                
-                if except_keywords:
-                    # Buat kondisi LIKE untuk setiap kata
-                    conditions = []
-                    for word in except_keywords:
-                        if len(word) > 2:  # Abaikan kata yang terlalu pendek
-                            conditions.append(f"question_normalized LIKE '%{word}%'")
-                    
-                    if conditions:
-                        where_clause = " AND ".join(conditions)
-                        
-                        query = f"""
-                        SELECT answer, question_normalized
-                        FROM `{TABLE_REF}`
-                        WHERE {where_clause}
-                        LIMIT 10
-                        """
-                        
-                        query_job = bq_client.query(query)
-                        results = list(query_job.result())
-                        
-                        if results:
-                            # Untuk pertanyaan 'kecuali', kita perlu mencari jawaban yang berbeda
-                            # dari kebanyakan jawaban lain yang mengandung kata kunci tersebut
-                            return f"Pertanyaan bertipe 'kecuali'. Ditemukan {len(results)} kemungkinan jawaban. Silakan periksa kembali pertanyaan Anda."
-            else:
-                # Untuk pertanyaan biasa, gunakan pendekatan fuzzy search biasa
-                # Buat kondisi LIKE untuk setiap kata
-                conditions = []
-                for word in keywords:
-                    if len(word) > 2:  # Abaikan kata yang terlalu pendek
-                        conditions.append(f"question_normalized LIKE '%{word}%'")
-                
-                if not conditions:
-                    raise ValueError("No valid conditions for fuzzy search")
-                
-                where_clause = " AND ".join(conditions)
-                
-                query = f"""
-                SELECT answer, question_normalized
-                FROM `{TABLE_REF}`
-                WHERE {where_clause}
-                LIMIT 10
-                """
-                
-                query_job = bq_client.query(query)
-                results = list(query_job.result())
-                
-                if results:
-                    # Hitung kemiripan untuk setiap hasil
-                    best_match = None
-                    best_score = 0
-                    
-                    for row in results:
-                        # Hitung kemiripan
-                        score = calculate_similarity(question_normalized, row.question_normalized)
-                        
-                        if score > best_score:
-                            best_score = score
-                            best_match = row.answer
-                            logger.debug(f"New best match: score={best_score:.3f}, answer={best_match[:50]}...")
-                    
-                    # Threshold untuk kemiripan - lebih tinggi untuk akurasi lebih baik
-                    if best_match and best_score > 0.6:  # Naikkan threshold dari 0.5 ke 0.6
-                        logger.info(f"Ditemukan jawaban dengan fuzzy search, skor {best_score:.3f}: {best_match}")
-                        return best_match
-        except Exception as e:
-            logger.error(f"Error pada query fuzzy search: {e}")
-        
-        # Langkah 4: Jika masih tidak ditemukan, coba dengan kata kunci yang lebih sedikit
-        try:
-            # Ambil kata-kata kunci yang paling penting
-            keywords = get_keywords(question_normalized)
-            
-            if len(keywords) > 3:
-                # Ambil hanya 3 kata kunci pertama yang terpanjang
-                important_keywords = sorted(keywords, key=len, reverse=True)[:3]
-                logger.info(f"Mencoba dengan kata kunci yang lebih sedikit: {important_keywords}")
-                
-                # Buat kondisi LIKE untuk kata kunci penting
-                conditions = []
-                for word in important_keywords:
-                    conditions.append(f"question_normalized LIKE '%{word}%'")
-                
-                where_clause = " OR ".join(conditions)  # Gunakan OR untuk mencari lebih banyak hasil
-                
-                query = f"""
-                SELECT answer, question_normalized
-                FROM `{TABLE_REF}`
-                WHERE {where_clause}
-                LIMIT 20
-                """
-                
-                query_job = bq_client.query(query)
-                results = list(query_job.result())
-                
-                if results:
-                    # Hitung kemiripan untuk setiap hasil
-                    best_match = None
-                    best_score = 0
-                    
-                    for row in results:
-                        # Hitung kemiripan
-                        score = calculate_similarity(question_normalized, row.question_normalized)
-                        
-                        if score > best_score:
-                            best_score = score
-                            best_match = row.answer
-                            logger.debug(f"New best match (reduced keywords): score={best_score:.3f}, answer={best_match[:50]}...")
-                    
-                    # Threshold yang sedikit lebih rendah untuk pencarian dengan kata kunci berkurang
-                    if best_match and best_score > 0.5:
-                        logger.info(f"Ditemukan jawaban dengan kata kunci berkurang, skor {best_score:.3f}: {best_match}")
-                        return best_match
-        except Exception as e:
-            logger.error(f"Error pada query dengan kata kunci berkurang: {e}")
-        
-        # Langkah 5: Jika masih tidak ditemukan, balas "Jawaban tidak ditemukan"
-        logger.info("Jawaban tidak ditemukan di database")
-        return "Jawaban tidak ditemukan"
-                
-    except Exception as e:
-        logger.error(f"Error mencari jawaban: {str(e)}", exc_info=True)
-        logger.error(f"Pertanyaan yang dicari: {question}")
-        return "Maaf, terjadi kesalahan saat mencari jawaban. Silakan coba lagi nanti."
-
 def process_csv_file(file_bytes: bytes) -> int:
-    """Memproses file CSV tanpa menggunakan pandas"""
+    """Proses file CSV dengan error handling yang lebih baik"""
     try:
-        # Decode bytes to string
-        content = file_bytes.decode('utf-8')
+        # Coba UTF-8 dulu
+        encodings = ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252']
+        content = None
+        
+        for encoding in encodings:
+            try:
+                content = file_bytes.decode(encoding)
+                logger.info(f"CSV decoded dengan encoding: {encoding}")
+                break
+            except UnicodeDecodeError:
+                continue
+        
+        if content is None:
+            logger.error("Tidak bisa decode CSV file")
+            return 0
+        
         csv_reader = csv.reader(io.StringIO(content))
         
-        # Read header
-        headers = next(csv_reader, [])
-        if not headers:
+        # Baca header
+        try:
+            headers = next(csv_reader, [])
+        except StopIteration:
+            logger.error("CSV file kosong")
             return 0
             
-        # Find question and answer columns
+        if not headers:
+            logger.error("CSV tidak memiliki header")
+            return 0
+            
+        # Cari kolom pertanyaan dan jawaban
         question_cols, answer_cols = find_question_answer_columns(headers)
         
         if not question_cols or not answer_cols:
+            logger.error(f"Kolom tidak ditemukan. Headers: {headers}")
             return 0
             
-        # Process rows
+        logger.info(f"Ditemukan kolom - Question: {question_cols[0]}, Answer: {answer_cols[0]}")
+        
+        # Proses baris data
         count_success = 0
-        for row in csv_reader:
-            if len(row) > max(question_cols[0], answer_cols[0]):
-                question = row[question_cols[0]].strip()
-                answer = row[answer_cols[0]].strip()
-                
-                if question and answer and simpan_soal(question, answer, "csv_upload"):
-                    count_success += 1
-                    
-        return count_success
-    except UnicodeDecodeError:
-        # Try with different encoding
-        try:
-            content = file_bytes.decode('latin-1')
-            csv_reader = csv.reader(io.StringIO(content))
-            
-            # Read header
-            headers = next(csv_reader, [])
-            if not headers:
-                return 0
-                
-            # Find question and answer columns
-            question_cols, answer_cols = find_question_answer_columns(headers)
-            
-            if not question_cols or not answer_cols:
-                return 0
-                
-            # Process rows
-            count_success = 0
-            for row in csv_reader:
+        count_error = 0
+        
+        for row_num, row in enumerate(csv_reader, start=2):
+            try:
                 if len(row) > max(question_cols[0], answer_cols[0]):
-                    question = row[question_cols[0]].strip()
-                    answer = row[answer_cols[0]].strip()
+                    question = clean_text(row[question_cols[0]])
+                    answer = clean_text(row[answer_cols[0]])
                     
-                    if question and answer and simpan_soal(question, answer, "csv_upload"):
-                        count_success += 1
-                        
-            return count_success
-        except Exception as e:
-            logger.error(f"Error processing CSV with latin-1: {e}")
-            return 0
+                    if question and answer and len(question) >= 3:
+                        if simpan_soal(question, answer, "csv_upload"):
+                            count_success += 1
+                        else:
+                            count_error += 1
+                    else:
+                        count_error += 1
+                        logger.debug(f"Baris {row_num} tidak valid: Q='{question}', A='{answer}'")
+                else:
+                    count_error += 1
+                    logger.debug(f"Baris {row_num} tidak memiliki kolom yang cukup")
+                    
+            except Exception as e:
+                count_error += 1
+                logger.error(f"Error processing row {row_num}: {e}")
+                
+        logger.info(f"CSV processing complete: {count_success} sukses, {count_error} error")
+        return count_success
+        
     except Exception as e:
         logger.error(f"Error processing CSV: {e}")
         return 0
 
+def parse_qa_text(text: str) -> List[Tuple[str, str]]:
+    """Parse teks untuk mengekstrak Q&A pairs"""
+    questions_answers = []
+    try:
+        # Pattern untuk Q: dan A:
+        pattern = r'(?i)(?:Q:|Pertanyaan:|Soal:)\s*(.*?)(?=(?:\n\s*(?:A:|Jawaban:)|\Z))(?:\s*(?:A:|Jawaban:)\s*(.*))?'
+        matches = re.findall(pattern, text, re.DOTALL)
+        
+        for match in matches:
+            question = clean_text(match[0])
+            answer = clean_text(match[1]) if len(match) > 1 else ""
+            
+            if question and answer:
+                questions_answers.append((question, answer))
+        
+        # Jika tidak ada pattern, coba split dengan baris baru
+        if not questions_answers and "\n" in text:
+            lines = [line.strip() for line in text.split("\n") if line.strip()]
+            for i in range(0, len(lines)-1, 2):
+                if i+1 < len(lines):
+                    question = clean_text(lines[i])
+                    answer = clean_text(lines[i+1])
+                    if question and answer:
+                        questions_answers.append((question, answer))
+    
+    except Exception as e:
+        logger.error(f"Error parsing Q&A text: {e}")
+    
+    return questions_answers
+
 # =======================
-# 🤖 TELEGRAM BOT HANDLER
+# TELEGRAM BOT HANDLERS
 # =======================
 
-# /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk command /start"""
     try:
         user = update.effective_user
-        logger.info(f"User {user.username} ({user.id}) menggunakan command /start")
+        logger.info(f"User {user.username} ({user.id}) menggunakan /start")
         
         welcome_text = (
-            "Halo! Saya adalah bot pencari jawaban dengan akurasi tinggi. Saya dapat membantu Anda:\n\n"
-            "1. Mencari jawaban dari pertanyaan teks - langsung ketik pertanyaan Anda\n"
-            "2. Mencari jawaban dari gambar - kirim gambar berisi pertanyaan\n"
-            "3. Menambah soal dan jawaban ke database - gunakan /tambah\n"
-            "4. Memproses file CSV - kirim file tersebut\n\n"
-            "Gunakan /help untuk info lebih lanjut."
+            "Halo! Saya adalah bot pencari jawaban dengan akurasi tinggi.\n\n"
+            "Yang bisa saya lakukan:\n"
+            "• Mencari jawaban dari pertanyaan teks\n"
+            "• Membaca dan menjawab pertanyaan dari gambar\n"
+            "• Menambah soal baru ke database\n"
+            "• Memproses file CSV berisi soal-jawab\n\n"
+            "Langsung ketik pertanyaan Anda atau gunakan /help untuk info lebih lanjut."
         )
         
         await update.message.reply_text(welcome_text)
     except Exception as e:
-        logger.error(f"Error di command /start: {e}")
-        await update.message.reply_text("Terjadi error. Silakan coba lagi nanti.")
+        logger.error(f"Error di /start: {e}")
+        await update.message.reply_text("Terjadi error. Silakan coba lagi.")
 
-# /help
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk command /help"""
     try:
         help_text = (
-            "📚 BOT PENCARI JAWABAN - BANTUAN\n\n"
-            "Perintah yang tersedia:\n"
+            "BOT PENCARI JAWABAN - PANDUAN PENGGUNAAN\n\n"
+            "PERINTAH:\n"
             "/start - Memulai bot\n"
             "/help - Menampilkan bantuan ini\n"
-            "/tambah [soal] | [jawaban] - Menambah soal dan jawaban ke database\n"
-            "/ocr - Melakukan OCR pada gambar yang dikirim sebelumnya\n\n"
-            "Cara penggunaan:\n"
-            "1. Untuk mencari jawaban, ketik langsung pertanyaan Anda\n"
-            "2. Untuk mencari jawaban dari gambar, kirim gambar berisi pertanyaan\n"
-            "3. Untuk menambah data, gunakan /tambah atau kirim file CSV\n\n"
-            "Bot menggunakan algoritma pencarian bertahap untuk hasil yang akurat!"
+            "/tambah [soal] | [jawaban] - Menambah soal ke database\n"
+            "/ocr - OCR pada gambar yang di-reply\n\n"
+            "CARA PENGGUNAAN:\n"
+            "1. Ketik langsung pertanyaan untuk mencari jawaban\n"
+            "2. Kirim gambar berisi pertanyaan\n"
+            "3. Kirim file CSV dengan kolom 'question' dan 'answer'\n\n"
+            "CONTOH:\n"
+            "- Siapa presiden pertama Indonesia?\n"
+            "- /tambah Ibukota Jepang? | Tokyo\n\n"
+            "Bot menggunakan AI untuk mencari jawaban yang paling relevan!"
         )
         
         await update.message.reply_text(help_text)
     except Exception as e:
-        logger.error(f"Error di command /help: {e}")
-        await update.message.reply_text("Terjadi error. Silakan coba lagi nanti.")
+        logger.error(f"Error di /help: {e}")
+        await update.message.reply_text("Terjadi error. Silakan coba lagi.")
 
-# /tambah
 async def tambah_soal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk command /tambah"""
     try:
         user = update.effective_user
-        logger.info(f"User {user.username} ({user.id}) menggunakan command /tambah dengan args: {context.args}")
+        logger.info(f"User {user.username} ({user.id}) menggunakan /tambah")
         
         if not context.args:
-            await update.message.reply_text("Format: /tambah [soal] | [jawaban]\nContoh: /tambah Siapa presiden pertama Indonesia? | Soekarno")
+            await update.message.reply_text(
+                "Format: /tambah [soal] | [jawaban]\n"
+                "Contoh: /tambah Siapa presiden pertama Indonesia? | Soekarno"
+            )
             return
         
-        # Gabungkan semua args dan split dengan pemisah |
         full_text = " ".join(context.args)
         if "|" not in full_text:
-            await update.message.reply_text("Gunakan | untuk memisahkan soal dan jawaban.\nContoh: /tambah Siapa presiden pertama Indonesia? | Soekarno")
+            await update.message.reply_text(
+                "Gunakan | untuk memisahkan soal dan jawaban.\n"
+                "Contoh: /tambah Siapa presiden pertama Indonesia? | Soekarno"
+            )
             return
         
         parts = full_text.split("|", 1)
         if len(parts) < 2:
-            await update.message.reply_text("Format salah. Pastikan ada soal dan jawaban.\nContoh: /tambah Siapa presiden pertama Indonesia? | Soekarno")
+            await update.message.reply_text(
+                "Format tidak lengkap. Pastikan ada soal dan jawaban.\n"
+                "Contoh: /tambah Siapa presiden pertama Indonesia? | Soekarno"
+            )
             return
         
         question, answer = parts[0].strip(), parts[1].strip()
         
+        if not question or not answer:
+            await update.message.reply_text("Soal dan jawaban tidak boleh kosong.")
+            return
+        
         if simpan_soal(question, answer, f"telegram_{user.id}"):
-            await update.message.reply_text("Soal dan jawaban berhasil ditambahkan!")
+            await update.message.reply_text(
+                f"✅ Soal berhasil ditambahkan!\n\n"
+                f"Soal: {question}\n"
+                f"Jawaban: {answer}"
+            )
         else:
-            await update.message.reply_text("Gagal menambahkan soal. Mungkin soal sudah ada di database.")
+            await update.message.reply_text(
+                "❌ Gagal menambahkan soal. Kemungkinan soal sudah ada di database."
+            )
             
     except Exception as e:
-        logger.error(f"Error di command /tambah: {e}")
-        await update.message.reply_text("Terjadi error. Silakan coba lagi nanti.")
+        logger.error(f"Error di /tambah: {e}")
+        await update.message.reply_text("Terjadi error saat menambah soal. Silakan coba lagi.")
 
-# Cari jawaban dari teks
 async def cari_jawaban_teks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk mencari jawaban dari bank soal berdasarkan teks"""
+    """Handler untuk mencari jawaban dari teks"""
     try:
         user = update.effective_user
         question = update.message.text.strip()
-        logger.info(f"User {user.username} ({user.id}) mencari jawaban untuk: '{question}'")
+        logger.info(f"User {user.username} ({user.id}) bertanya: '{question}'")
         
-        # Validasi panjang pertanyaan
         if len(question) < 2:
-            await update.message.reply_text("Pertanyaan terlalu pendek. Silakan berikan pertanyaan yang lebih lengkap.")
+            await update.message.reply_text(
+                "Pertanyaan terlalu pendek. Silakan berikan pertanyaan yang lebih lengkap."
+            )
             return
         
-        # Periksa koneksi database sebelum melanjutkan
         if bq_client is None:
-            await update.message.reply_text("Maaf, database sedang tidak tersedia. Silakan coba lagi nanti.")
+            await update.message.reply_text(
+                "Database sedang tidak tersedia. Silakan coba lagi nanti."
+            )
             return
         
-        # Tampilkan status sedang mencari
+        # Show typing indicator
         await update.message.reply_chat_action(action="typing")
         
         # Cari jawaban
         answer = find_answer_from_question(question)
         
-        # Kirim jawaban
-        await update.message.reply_text(f"Pertanyaan: {question}\n\nJawaban: {answer}")
+        # Format response
+        if answer and answer != "Jawaban tidak ditemukan":
+            response = f"❓ Pertanyaan: {question}\n\n✅ Jawaban: {answer}"
+        else:
+            response = f"❓ Pertanyaan: {question}\n\n❌ {answer}"
+            
+        await update.message.reply_text(response)
         
     except Exception as e:
         logger.error(f"Error mencari jawaban teks: {e}", exc_info=True)
-        await update.message.reply_text("Maaf, terjadi kesalahan saat mencari jawaban. Silakan coba lagi nanti.")
+        await update.message.reply_text(
+            "Terjadi kesalahan saat mencari jawaban. Silakan coba lagi nanti."
+        )
 
-# Cari jawaban dari gambar
 async def cari_jawaban_gambar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk mencari jawaban dari bank soal berdasarkan gambar"""
+    """Handler untuk mencari jawaban dari gambar"""
     try:
         user = update.effective_user
-        photo = update.message.photo[-1]  # Ambil resolusi tertinggi
-        file_id = photo.file_id
-        file_size = photo.file_size
-        logger.info(f"User {user.username} ({user.id}) mencari jawaban dari gambar dengan ID: {file_id} ({file_size} bytes)")
+        photo = update.message.photo[-1]
+        logger.info(f"User {user.username} ({user.id}) kirim gambar: {photo.file_id}")
         
-        # Tampilkan status sedang memproses
         await update.message.reply_chat_action(action="typing")
         
         # Download gambar
-        file = await context.bot.get_file(file_id)
+        file = await context.bot.get_file(photo.file_id)
         file_bytes = await file.download_as_bytearray()
         
-        # Lakukan OCR dengan Google Vision terlebih dahulu
+        # OCR dengan Google Vision dulu
         ocr_text = ocr_with_google_vision(bytes(file_bytes))
         
-        # Jika Google Vision gagal, gunakan OCR.Space sebagai fallback
-        if not ocr_text:
-            logger.info("Google Vision gagal, mencoba OCR.Space sebagai fallback")
+        # Fallback ke OCR.Space jika gagal
+        if not ocr_text or len(ocr_text.strip()) < 3:
+            logger.info("Google Vision gagal, mencoba OCR.Space")
             ocr_text = ocr_with_ocr_space(bytes(file_bytes))
             
-            # Jika OCR.Space juga gagal
-            if not ocr_text:
-                await update.message.reply_text("Tidak dapat membaca teks dari gambar. Pastikan gambar jelas dan berisi teks.")
+            if not ocr_text or len(ocr_text.strip()) < 3:
+                await update.message.reply_text(
+                    "❌ Tidak dapat membaca teks dari gambar.\n"
+                    "Pastikan gambar jelas dan berisi teks yang dapat dibaca."
+                )
                 return
-            else:
-                logger.info("OCR.Space berhasil sebagai fallback")
         
-        # Validasi panjang teks hasil OCR
-        if len(ocr_text.strip()) < 2:
-            await update.message.reply_text("Teks yang terdeteksi terlalu pendek. Pastikan gambar berisi pertanyaan yang jelas.")
-            return
+        logger.info(f"OCR hasil: '{ocr_text}'")
         
-        # Cari jawaban berdasarkan teks hasil OCR
+        # Cari jawaban berdasarkan teks OCR
         answer = find_answer_from_question(ocr_text)
         
-        # Kirim hasil
-        await update.message.reply_text(f"Teks terdeteksi: {ocr_text}\n\nJawaban: {answer}")
+        # Format response
+        response = f"📷 Teks terdeteksi: {ocr_text}\n\n"
+        
+        if answer and answer != "Jawaban tidak ditemukan":
+            response += f"✅ Jawaban: {answer}"
+        else:
+            response += f"❌ {answer}"
+            
+        await update.message.reply_text(response)
         
     except Exception as e:
         logger.error(f"Error mencari jawaban gambar: {e}", exc_info=True)
-        await update.message.reply_text("Terjadi error saat memproses gambar. Silakan coba lagi nanti.")
+        await update.message.reply_text(
+            "Terjadi error saat memproses gambar. Silakan coba lagi nanti."
+        )
 
-# Command untuk OCR
 async def ocr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk command /ocr"""
     try:
         user = update.effective_user
-        logger.info(f"User {user.username} ({user.id}) menggunakan command /ocr")
+        logger.info(f"User {user.username} ({user.id}) menggunakan /ocr")
         
-        # Cek apakah ada gambar yang dikirim sebelumnya
+        # Cek apakah ada gambar yang di-reply
         if not update.message.reply_to_message or not update.message.reply_to_message.photo:
-            await update.message.reply_text("Kirim gambar terlebih dahulu, lalu reply dengan /ocr")
+            await update.message.reply_text(
+                "Kirim gambar terlebih dahulu, lalu reply dengan /ocr"
+            )
             return
         
+        await update.message.reply_chat_action(action="typing")
+        
         # Dapatkan gambar dari pesan yang di-reply
-        photo = update.message.reply_to_message.photo[-1]  # Ambil resolusi tertinggi
-        file_id = photo.file_id
+        photo = update.message.reply_to_message.photo[-1]
         
         # Download gambar
-        file = await context.bot.get_file(file_id)
+        file = await context.bot.get_file(photo.file_id)
         file_bytes = await file.download_as_bytearray()
         
-        # Lakukan OCR dengan Google Vision terlebih dahulu
+        # OCR dengan Google Vision dulu
         ocr_text = ocr_with_google_vision(bytes(file_bytes))
         
-        # Jika Google Vision gagal, gunakan OCR.Space sebagai fallback
+        # Fallback ke OCR.Space jika gagal
         if not ocr_text:
-            logger.info("Google Vision gagal, mencoba OCR.Space sebagai fallback")
+            logger.info("Google Vision gagal, mencoba OCR.Space")
             ocr_text = ocr_with_ocr_space(bytes(file_bytes))
             
-            # Jika OCR.Space juga gagal
             if not ocr_text:
-                await update.message.reply_text("Tidak dapat membaca teks dari gambar.")
+                await update.message.reply_text("❌ Tidak dapat membaca teks dari gambar.")
                 return
-            else:
-                logger.info("OCR.Space berhasil sebagai fallback")
         
-        await update.message.reply_text(f"Hasil OCR:\n\n{ocr_text}")
+        await update.message.reply_text(f"📄 Hasil OCR:\n\n{ocr_text}")
         
     except Exception as e:
-        logger.error(f"Error di command /ocr: {e}", exc_info=True)
-        await update.message.reply_text("Terjadi error saat melakukan OCR. Silakan coba lagi nanti.")
+        logger.error(f"Error di /ocr: {e}", exc_info=True)
+        await update.message.reply_text("Terjadi error saat melakukan OCR. Silakan coba lagi.")
 
-# Upload file (CSV)
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk upload file CSV"""
     try:
@@ -908,15 +936,25 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = update.message.document
         filename = file.file_name
         file_size = file.file_size
-        logger.info(f"User {user.username} ({user.id}) mengupload file: {filename} ({file_size} bytes)")
+        logger.info(f"User {user.username} ({user.id}) upload: {filename} ({file_size} bytes)")
         
-        # Hanya terima file CSV
-        if not filename.endswith('.csv'):
-            await update.message.reply_text("Hanya file CSV yang didukung.")
+        # Validasi file CSV
+        if not filename or not filename.lower().endswith('.csv'):
+            await update.message.reply_text(
+                "❌ Hanya file CSV yang didukung.\n"
+                "Pastikan file memiliki ekstensi .csv"
+            )
             return
         
-        # Tampilkan status sedang memproses
+        # Validasi ukuran file (maksimal 10MB)
+        if file_size > 10 * 1024 * 1024:
+            await update.message.reply_text(
+                "❌ File terlalu besar. Maksimal 10MB."
+            )
+            return
+        
         await update.message.reply_chat_action(action="typing")
+        await update.message.reply_text("⏳ Memproses file CSV...")
         
         # Download file
         file_obj = await context.bot.get_file(file.file_id)
@@ -926,38 +964,162 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count_success = process_csv_file(file_bytes)
         
         if count_success > 0:
-            await update.message.reply_text(f"File berhasil diproses. {count_success} soal ditambahkan ke database.")
+            await update.message.reply_text(
+                f"✅ File berhasil diproses!\n"
+                f"📊 {count_success} soal ditambahkan ke database."
+            )
         else:
-            await update.message.reply_text("Gagal memproses file. Pastikan format file benar dan memiliki kolom 'question' dan 'answer'.")
+            await update.message.reply_text(
+                "❌ Gagal memproses file.\n\n"
+                "Pastikan:\n"
+                "• File berformat CSV\n"
+                "• Ada kolom 'question' dan 'answer'\n"
+                "• Data tidak kosong"
+            )
             
     except Exception as e:
         logger.error(f"Error handling file: {e}", exc_info=True)
-        await update.message.reply_text("Terjadi error saat memproses file. Silakan coba lagi nanti.")
+        await update.message.reply_text(
+            "❌ Terjadi error saat memproses file. Silakan coba lagi nanti."
+        )
 
-# Handler untuk error
+async def handle_text_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler untuk file teks berisi Q&A"""
+    try:
+        user = update.effective_user
+        message = update.message
+        
+        # Cek apakah ada file teks
+        if not message.document:
+            return
+            
+        file = message.document
+        filename = file.file_name
+        
+        # Hanya proses file teks
+        if not filename or not filename.lower().endswith(('.txt', '.text')):
+            return
+        
+        logger.info(f"User {user.username} ({user.id}) upload file teks: {filename}")
+        
+        await message.reply_chat_action(action="typing")
+        await message.reply_text("⏳ Memproses file teks...")
+        
+        # Download file
+        file_obj = await context.bot.get_file(file.file_id)
+        file_bytes = await file_obj.download_as_bytearray()
+        
+        # Decode file
+        try:
+            content = file_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            content = file_bytes.decode('latin-1')
+        
+        # Parse Q&A pairs
+        qa_pairs = parse_qa_text(content)
+        
+        if not qa_pairs:
+            await message.reply_text(
+                "❌ Tidak ditemukan format Q&A yang valid.\n\n"
+                "Format yang didukung:\n"
+                "Q: Pertanyaan?\n"
+                "A: Jawaban\n\n"
+                "atau:\n\n"
+                "Pertanyaan?\n"
+                "Jawaban"
+            )
+            return
+        
+        # Simpan ke database
+        count_success = 0
+        for question, answer in qa_pairs:
+            if simpan_soal(question, answer, f"text_file_{user.id}"):
+                count_success += 1
+        
+        await message.reply_text(
+            f"✅ File teks berhasil diproses!\n"
+            f"📊 {count_success} dari {len(qa_pairs)} soal ditambahkan ke database."
+        )
+        
+    except Exception as e:
+        logger.error(f"Error handling text file: {e}", exc_info=True)
+        await update.message.reply_text(
+            "❌ Terjadi error saat memproses file teks."
+        )
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk error"""
-    logger.error(f"Exception while handling an update: {context.error}", exc_info=True)
+    """Global error handler"""
+    logger.error(f"Update {update} caused error {context.error}", exc_info=True)
+    
     if update and update.message:
-        await update.message.reply_text("Terjadi error. Silakan coba lagi nanti.")
+        try:
+            await update.message.reply_text(
+                "❌ Terjadi error tidak terduga. Silakan coba lagi atau hubungi admin."
+            )
+        except Exception as e:
+            logger.error(f"Error sending error message: {e}")
 
 # =======================
-# 🚀 MAIN
+# MAIN FUNCTION
 # =======================
 
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler untuk command /debug - untuk testing normalisasi"""
+    try:
+        user = update.effective_user
+        
+        if not context.args:
+            await update.message.reply_text(
+                "Format: /debug [pertanyaan]\n"
+                "Contoh: /debug Siapa presiden pertama Indonesia?"
+            )
+            return
+        
+        question = " ".join(context.args)
+        normalized = normalize_for_search(question)
+        keywords = extract_keywords(normalized)
+        
+        debug_text = (
+            f"🔍 DEBUG NORMALISASI\n\n"
+            f"Input: {question}\n"
+            f"Normalized: {normalized}\n"
+            f"Keywords: {keywords}\n\n"
+            f"📊 STATISTIK:\n"
+            f"- Panjang asli: {len(question)} karakter\n"
+            f"- Panjang normalized: {len(normalized)} karakter\n"
+            f"- Jumlah kata: {len(normalized.split())}\n"
+            f"- Jumlah keywords: {len(keywords)}"
+        )
+        
+        await update.message.reply_text(debug_text)
+        
+        # Test pencarian
+        if len(normalized) >= 3:
+            await update.message.reply_chat_action(action="typing")
+            answer = find_answer_from_question(question)
+            
+            result_text = f"🎯 HASIL PENCARIAN:\n{answer}"
+            await update.message.reply_text(result_text)
+        
+    except Exception as e:
+        logger.error(f"Error di /debug: {e}")
+        await update.message.reply_text("Terjadi error saat debugging.")
+
+# Tambahkan handler debug ke main function
 def main():
     """Fungsi utama untuk menjalankan bot"""
     try:
-        # Token bot dari environment variable
+        # Validasi environment variables
         TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
         if not TOKEN:
             logger.error("TELEGRAM_BOT_TOKEN tidak ditemukan di environment variables")
             return
         
         # Inisialisasi services
+        logger.info("Menginisialisasi services...")
         initialize_services()
         
-        # Buat application dan tambahkan handlers
+        # Buat application
         application = Application.builder().token(TOKEN).build()
         
         # Command handlers
@@ -965,21 +1127,41 @@ def main():
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("tambah", tambah_soal))
         application.add_handler(CommandHandler("ocr", ocr_command))
+        application.add_handler(CommandHandler("debug", debug_command))  # Tambah debug handler
         
-        # Message handlers
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cari_jawaban_teks))
+        # Message handlers - urutan penting!
+        application.add_handler(MessageHandler(
+            filters.Document.FileExtension("csv"), 
+            handle_file
+        ))
+        application.add_handler(MessageHandler(
+            filters.Document.FileExtension("txt") | filters.Document.FileExtension("text"), 
+            handle_text_file
+        ))
         application.add_handler(MessageHandler(filters.PHOTO, cari_jawaban_gambar))
-        application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+        application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND, 
+            cari_jawaban_teks
+        ))
         
         # Error handler
         application.add_error_handler(error_handler)
         
         # Jalankan bot
-        logger.info("Bot sedang berjalan...")
-        application.run_polling()
+        logger.info("🤖 Bot sedang berjalan...")
+        logger.info("Tekan Ctrl+C untuk menghentikan bot")
         
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True
+        )
+        
+    except KeyboardInterrupt:
+        logger.info("Bot dihentikan oleh user")
     except Exception as e:
         logger.error(f"Error in main: {e}", exc_info=True)
+    finally:
+        logger.info("Bot shutdown complete")
 
 if __name__ == "__main__":
     main()
