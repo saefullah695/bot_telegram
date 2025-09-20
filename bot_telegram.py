@@ -86,14 +86,33 @@ def initialize_services():
         raise
 
 def normalize_text(text: str) -> str:
-    """Normalisasi teks: hapus semua tanda baca dan spasi berlebih"""
+    """Normalisasi teks: hapus semua tanda baca dan spasi berlebih dengan penanganan khusus untuk rumus"""
     try:
         # Konversi ke bentuk unicode NFKD untuk menangani karakter khusus
         normalized = unicodedata.normalize('NFKD', text)
         
-        # Hapus semua tanda baca termasuk karakter khusus seperti ..., :, dll.
-        # Pola ini menghapus semua karakter non-alfanumerik kecuali spasi
-        normalized = re.sub(r'[^\w\s]', ' ', normalized)
+        # Simpan simbol matematika penting sebelum menghapus karakter non-alfanumerik
+        math_symbols = {
+            '×': 'x',
+            '÷': '/',
+            '−': '-',
+            '–': '-',
+            '≠': ' tidak sama dengan ',
+            '≤': ' kurang dari sama dengan ',
+            '≥': ' lebih dari sama dengan ',
+            '±': ' plus minus ',
+            '∑': ' sigma ',
+            '∆': ' delta ',
+            'π': ' pi ',
+            '∞': ' tak hingga '
+        }
+        
+        # Ganti simbol matematika dengan representasi teksnya
+        for symbol, replacement in math_symbols.items():
+            normalized = normalized.replace(symbol, replacement)
+        
+        # Hapus semua tanda baca kecuali yang relevan untuk rumus matematika
+        normalized = re.sub(r'[^\w\s\(\)\+\-\*\/\=\%]', ' ', normalized)
         
         # Hapus spasi berlebih (ganti multiple spasi dengan satu spasi)
         normalized = re.sub(r'\s+', ' ', normalized)
@@ -141,7 +160,7 @@ def get_keywords(text: str) -> List[str]:
     return keywords
 
 def calculate_similarity(query: str, document: str) -> float:
-    """Hitung kemiripan sederhana antara query dan document"""
+    """Hitung kemiripan sederhana antara query dan document dengan bobot kata kunci"""
     # Normalisasi keduanya sebelum perbandingan
     normalized_query = normalize_text(query)
     normalized_document = normalize_text(document)
@@ -158,8 +177,23 @@ def calculate_similarity(query: str, document: str) -> float:
     # Hitung union
     union = query_words.union(doc_words)
     
-    # Jaccard similarity
-    return len(intersection) / len(union) if union else 0
+    # Jaccard similarity dasar
+    jaccard_similarity = len(intersection) / len(union) if union else 0
+    
+    # Berikan bobot ekstra untuk kata-kata penting (panjang > 5 karakter)
+    important_words = [word for word in intersection if len(word) > 5]
+    important_bonus = len(important_words) * 0.1
+    
+    # Berikan bobot ekstra jika ada kata yang sama di awal query
+    first_word_query = normalized_query.split()[0] if normalized_query.split() else ""
+    first_word_doc = normalized_document.split()[0] if normalized_document.split() else ""
+    first_word_bonus = 0.2 if first_word_query == first_word_doc else 0
+    
+    # Gabungkan semua skor
+    total_similarity = jaccard_similarity + important_bonus + first_word_bonus
+    
+    # Batasi maksimum 1.0
+    return min(total_similarity, 1.0)
 
 def is_except_question(question: str) -> bool:
     """Mendeteksi apakah pertanyaan mengandung kata 'kecuali'"""
@@ -187,6 +221,174 @@ def handle_short_questions(question: str) -> str:
             return value
     
     return ""
+
+# =======================
+# ⚙️ FUNGSI UNTUK MENANGANI RUMUS MATEMATIKA
+# =======================
+
+def is_formula_question(text: str) -> bool:
+    """Mendeteksi apakah pertanyaan mengandung rumus matematika"""
+    formula_indicators = ['=', '×', '÷', '+', '-', '(', ')', 'rumus', 'formula', 'hitung', 'perhitungan', 'nsb', 'btsb']
+    normalized_text = normalize_text(text)
+    return any(indicator in normalized_text for indicator in formula_indicators)
+
+def extract_formula_components(text: str) -> List[str]:
+    """Ekstrak komponen penting dari rumus matematika"""
+    # Normalisasi teks
+    normalized = normalize_text(text)
+    
+    # Simpan simbol matematika penting
+    math_symbols = {
+        'x': 'kali',
+        '/': 'bagi',
+        '-': 'kurang',
+        '+': 'tambah',
+        '=': 'sama dengan',
+        '(': 'buka kurung',
+        ')': 'tutup kurung'
+    }
+    
+    # Ganti simbol matematika dengan representasi teksnya
+    for symbol, replacement in math_symbols.items():
+        normalized = normalized.replace(symbol, replacement)
+    
+    # Ekstrak kata-kata yang mungkin merupakan komponen rumus
+    components = []
+    
+    # Cari pola seperti "nsb", "total net sales", dll.
+    formula_parts = re.findall(r'([a-zA-Z\s]{3,})', normalized)
+    components.extend(formula_parts)
+    
+    # Cari kata-kata penting dalam teks
+    important_words = []
+    for word in normalized.split():
+        if len(word) > 3 and word not in STOPWORDS:
+            important_words.append(word)
+    
+    # Ambil hanya 5 kata terpenting
+    components.extend(important_words[:5])
+    
+    return components
+
+def normalize_formula_text(text: str) -> str:
+    """Normalisasi khusus untuk teks yang mengandung rumus matematika"""
+    try:
+        # Simpan simbol matematika penting
+        math_symbols = {
+            '×': ' x ',
+            '÷': ' / ',
+            '−': ' - ',
+            '–': ' - ',
+            '≠': ' tidak sama dengan ',
+            '≤': ' kurang dari sama dengan ',
+            '≥': ' lebih dari sama dengan ',
+            '±': ' plus minus ',
+            '∑': ' sigma ',
+            '∆': ' delta ',
+            'π': ' pi ',
+            '∞': ' tak hingga '
+        }
+        
+        # Ganti simbol matematika dengan representasi teksnya
+        result = text
+        for symbol, replacement in math_symbols.items():
+            result = result.replace(symbol, replacement)
+        
+        # Normalisasi teks dengan fungsi normalisasi standar
+        result = normalize_text(result)
+        
+        # Hapus spasi berlebih lagi setelah penggantian simbol
+        result = re.sub(r'\s+', ' ', result).strip()
+        
+        return result
+    except Exception as e:
+        logger.error(f"Error normalisasi rumus: {e}")
+        return normalize_text(text)
+
+def expand_formula_abbreviations(text: str) -> str:
+    """Memperluas singkatan umum dalam rumus matematika"""
+    try:
+        # Daftar singkatan umum dalam rumus dan ekspansinya
+        abbreviations = {
+            'nsb': 'nilai setelah barang',
+            'btsb': 'barang tak terjual',
+            'hpp': 'harga pokok penjualan',
+            'laba': 'laba kotor',
+            'rugi': 'rugi kotor',
+            'mod': 'modulo',
+            'avg': 'average',
+            'max': 'maximum',
+            'min': 'minimum',
+            'std': 'standard deviation',
+            'var': 'variance'
+        }
+        
+        # Normalisasi teks terlebih dahulu
+        normalized = normalize_text(text)
+        
+        # Ganti singkatan dengan bentuk lengkapnya
+        for abbr, expansion in abbreviations.items():
+            # Gunakan regex untuk memastikan kita hanya mengganti kata-kata utuh
+            normalized = re.sub(r'\b' + abbr + r'\b', expansion, normalized)
+        
+        return normalized
+    except Exception as e:
+        logger.error(f"Error expanding formula abbreviations: {e}")
+        return text
+
+def calculate_formula_similarity(query: str, document: str) -> float:
+    """Hitung kemiripan khusus untuk pertanyaan rumus matematika"""
+    try:
+        # Normalisasi keduanya sebelum perbandingan
+        normalized_query = normalize_text(query)
+        normalized_document = normalize_text(document)
+        
+        # Ekstrak kata kunci
+        query_words = set(get_keywords(normalized_query))
+        doc_words = set(get_keywords(normalized_document))
+        
+        if not query_words or not doc_words:
+            return 0.0
+        
+        # Hitung intersection
+        intersection = query_words.intersection(doc_words)
+        
+        # Hitung union
+        union = query_words.union(doc_words)
+        
+        # Jaccard similarity dasar
+        jaccard_similarity = len(intersection) / len(union) if union else 0
+        
+        # Berikan bobot ekstra untuk kata-kata penting dalam rumus
+        formula_keywords = ['rumus', 'formula', 'hitung', 'perhitungan', 'nsb', 'btsb', 'total', 'net', 'sales', 'selisih', 'barang']
+        
+        important_matches = 0
+        for keyword in formula_keywords:
+            if keyword in intersection:
+                important_matches += 1
+        
+        # Berikan bobot ekstra untuk setiap kata kunci penting yang cocok
+        important_bonus = important_matches * 0.15
+        
+        # Berikan bobot ekstra jika ada kata yang sama di awal query
+        first_word_query = normalized_query.split()[0] if normalized_query.split() else ""
+        first_word_doc = normalized_document.split()[0] if normalized_document.split() else ""
+        first_word_bonus = 0.2 if first_word_query == first_word_doc else 0
+        
+        # Berikan bobot ekstra untuk struktur kalimat yang mirip
+        query_structure = set(re.findall(r'\b\w{4,}\b', normalized_query))
+        doc_structure = set(re.findall(r'\b\w{4,}\b', normalized_document))
+        structure_intersection = query_structure.intersection(doc_structure)
+        structure_bonus = len(structure_intersection) * 0.05
+        
+        # Gabungkan semua skor
+        total_similarity = jaccard_similarity + important_bonus + first_word_bonus + structure_bonus
+        
+        # Batasi maksimum 1.0
+        return min(total_similarity, 1.0)
+    except Exception as e:
+        logger.error(f"Error calculating formula similarity: {e}")
+        return 0.0
 
 # =======================
 # ⚙️ FUNGSI UTAMA
@@ -363,7 +565,7 @@ def find_answer_from_question(question: str) -> str:
             logger.error("BigQuery client tidak tersedia")
             return "Maaf, database sedang tidak tersedia. Silakan coba lagi nanti."
         
-        # Normalisasi pertanyaan (hapus semua tanda baca dan spasi berlebih)
+        # Normalisasi pertanyaan
         question_normalized = normalize_text(question)
         logger.info(f"Pertanyaan setelah normalisasi: '{question_normalized}'")
         
@@ -378,6 +580,135 @@ def find_answer_from_question(question: str) -> str:
             return "Pertanyaan terlalu pendek. Silakan berikan pertanyaan yang lebih lengkap."
         
         logger.info(f"Mencari jawaban untuk: '{question}' (normalized: '{question_normalized}')")
+        
+        # Langkah 0: Jika ini pertanyaan tentang rumus, gunakan pendekatan khusus
+        if is_formula_question(question):
+            logger.info("Mendeteksi pertanyaan tentang rumus, menggunakan pendekatan khusus")
+            
+            # Perluas singkatan dalam rumus
+            expanded_question = expand_formula_abbreviations(question)
+            logger.info(f"Pertanyaan setelah perluasan singkatan: '{expanded_question}'")
+            
+            # Normalisasi khusus untuk rumus
+            formula_normalized = normalize_formula_text(expanded_question)
+            logger.info(f"Pertanyaan rumus setelah normalisasi khusus: '{formula_normalized}'")
+            
+            # Langkah 0.1: Cari exact match dengan normalisasi rumus
+            try:
+                query = """
+                SELECT answer 
+                FROM `{0}` 
+                WHERE question_normalized = @formula_normalized
+                LIMIT 1
+                """.format(TABLE_REF)
+                
+                job_config = bigquery.QueryJobConfig(
+                    query_parameters=[
+                        bigquery.ScalarQueryParameter("formula_normalized", "STRING", formula_normalized)
+                    ]
+                )
+                
+                query_job = bq_client.query(query, job_config=job_config)
+                results = list(query_job.result())
+                
+                if results:
+                    logger.info("Ditemukan exact match untuk rumus dengan normalisasi khusus")
+                    return results[0].answer
+            except Exception as e:
+                logger.error(f"Error pada query exact match rumus: {e}")
+            
+            # Langkah 0.2: Jika tidak ditemukan, ekstrak komponen penting dari rumus
+            formula_components = extract_formula_components(expanded_question)
+            logger.info(f"Komponen rumus yang diekstrak: {formula_components}")
+            
+            # Cari berdasarkan komponen rumus
+            if formula_components:
+                # Buat kondisi LIKE untuk setiap komponen
+                conditions = []
+                for component in formula_components:
+                    if len(component) > 2:  # Abaikan komponen yang terlalu pendek
+                        conditions.append(f"question_normalized LIKE '%{component}%'")
+                
+                if conditions:
+                    where_clause = " AND ".join(conditions)
+                    
+                    query = f"""
+                    SELECT answer, question_normalized
+                    FROM `{TABLE_REF}`
+                    WHERE {where_clause}
+                    LIMIT 5
+                    """
+                    
+                    query_job = bq_client.query(query)
+                    results = list(query_job.result())
+                    
+                    if results:
+                        # Hitung kemiripan untuk setiap hasil
+                        best_match = None
+                        best_score = 0
+                        
+                        for row in results:
+                            # Hitung kemiripan dengan bobot khusus untuk rumus
+                            score = calculate_formula_similarity(formula_normalized, row.question_normalized)
+                            
+                            if score > best_score:
+                                best_score = score
+                                best_match = row.answer
+                                logger.debug(f"New best match (formula): score={best_score:.3f}, answer={best_match[:50]}...")
+                        
+                        # Threshold lebih rendah untuk pencarian rumus
+                        if best_match and best_score > 0.4:
+                            logger.info(f"Ditemukan jawaban rumus dengan skor {best_score:.3f}: {best_match}")
+                            return best_match
+            
+            # Langkah 0.3: Cari berdasarkan kata kunci penting saja
+            try:
+                # Ekstrak kata kunci penting dari rumus
+                important_keywords = []
+                for word in formula_normalized.split():
+                    if len(word) > 3 and word not in STOPWORDS:
+                        important_keywords.append(word)
+                
+                if not important_keywords:
+                    raise ValueError("No important keywords found in formula")
+                
+                # Cari berdasarkan kata kunci penting
+                conditions = []
+                for keyword in important_keywords[:3]:  # Batasi hanya 3 kata kunci terpenting
+                    conditions.append(f"question_normalized LIKE '%{keyword}%'")
+                
+                where_clause = " AND ".join(conditions)
+                
+                query = f"""
+                SELECT answer, question_normalized
+                FROM `{TABLE_REF}`
+                WHERE {where_clause}
+                LIMIT 5
+                """
+                
+                query_job = bq_client.query(query)
+                results = list(query_job.result())
+                
+                if results:
+                    # Hitung kemiripan untuk setiap hasil
+                    best_match = None
+                    best_score = 0
+                    
+                    for row in results:
+                        # Hitung kemiripan dengan bobot khusus untuk rumus
+                        score = calculate_formula_similarity(formula_normalized, row.question_normalized)
+                        
+                        if score > best_score:
+                            best_score = score
+                            best_match = row.answer
+                            logger.debug(f"New best match (formula keywords): score={best_score:.3f}, answer={best_match[:50]}...")
+                    
+                    # Threshold lebih rendah untuk pencarian berdasarkan kata kunci
+                    if best_match and best_score > 0.3:
+                        logger.info(f"Ditemukan jawaban rumus dengan kata kunci, skor {best_score:.3f}: {best_match}")
+                        return best_match
+            except Exception as e:
+                logger.error(f"Error pada query kata kunci rumus: {e}")
         
         # Langkah 1: Cari exact match di question_normalized
         try:
@@ -482,7 +813,56 @@ def find_answer_from_question(question: str) -> str:
         except Exception as e:
             logger.error(f"Error pada query fuzzy search: {e}")
         
-        # Langkah 4: Jika masih tidak ditemukan, balas "Jawaban tidak ditemukan"
+        # Langkah 4: Cari berdasarkan kata kunci penting saja
+        try:
+            # Ekstrak kata kunci penting
+            important_keywords = []
+            for word in words:
+                if len(word) > 3 and word not in STOPWORDS:
+                    important_keywords.append(word)
+            
+            if not important_keywords:
+                raise ValueError("No important keywords found")
+            
+            # Cari berdasarkan kata kunci penting
+            conditions = []
+            for keyword in important_keywords[:3]:  # Batasi hanya 3 kata kunci terpenting
+                conditions.append(f"question_normalized LIKE '%{keyword}%'")
+            
+            where_clause = " AND ".join(conditions)
+            
+            query = f"""
+            SELECT answer, question_normalized
+            FROM `{TABLE_REF}`
+            WHERE {where_clause}
+            LIMIT 5
+            """
+            
+            query_job = bq_client.query(query)
+            results = list(query_job.result())
+            
+            if results:
+                # Hitung kemiripan untuk setiap hasil
+                best_match = None
+                best_score = 0
+                
+                for row in results:
+                    # Hitung kemiripan
+                    score = calculate_similarity(question_normalized, row.question_normalized)
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_match = row.answer
+                        logger.debug(f"New best match (keywords): score={best_score:.3f}, answer={best_match[:50]}...")
+                
+                # Threshold lebih rendah untuk pencarian berdasarkan kata kunci
+                if best_match and best_score > 0.3:
+                    logger.info(f"Ditemukan jawaban dengan kata kunci, skor {best_score:.3f}: {best_match}")
+                    return best_match
+        except Exception as e:
+            logger.error(f"Error pada query kata kunci: {e}")
+        
+        # Langkah 5: Jika masih tidak ditemukan, balas "Jawaban tidak ditemukan"
         logger.info("Jawaban tidak ditemukan di database")
         return "Jawaban tidak ditemukan"
                 
