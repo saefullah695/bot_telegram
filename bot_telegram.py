@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # Konfigurasi BigQuery
 PROJECT_ID = os.getenv("PROJECT_ID", "prime-chess-472020-b6")
 DATASET_ID = os.getenv("DATASET_ID", "Data")
-TABLE_ID = os.getenv("TABLE_ID", "mtk")
+TABLE_ID = os.getenv("TABLE_ID", "Telegram-new")
 TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 
 # OCR.Space API Key
@@ -119,7 +119,7 @@ def clean_text(text: str) -> str:
         return str(text).strip() if text else ""
 
 def normalize_for_search(text: str) -> str:
-    """Normalisasi sesuai dengan format data di database (tanpa tanda baca dan spasi tunggal)"""
+    """Normalisasi sesuai dengan format data di database (pertahankan simbol matematika)"""
     try:
         text = clean_text(text)
         if not text:
@@ -134,14 +134,26 @@ def normalize_for_search(text: str) -> str:
             'kenapa': 'mengapa',
             'kapankah': 'kapan',
             'siapakah': 'siapa',
-            'apakah': 'apa'
+            'apakah': 'apa',
+            'yg': 'yang',
+            'dgn': 'dengan',
+            'spt': 'seperti',
+            'utk': 'untuk',
+            'sdh': 'sudah',
+            'tdk': 'tidak',
+            'blm': 'belum',
+            'krn': 'karena',
+            'jg': 'juga',
+            'dkk': 'dan kawan-kawan',
+            'dll': 'dan lain-lain'
         }
         
         for old, new in replacements.items():
             text = re.sub(rf'\b{old}\b', new, text)
         
-        # Hapus SEMUA tanda baca untuk menyesuaikan dengan format database
-        text = re.sub(r'[^\w\s]', ' ', text)
+        # Hapus karakter yang bukan huruf, angka, spasi, atau simbol matematika
+        # Pertahankan: + - * / = ( ) [ ] { } < > ^ %
+        text = re.sub(r'[^\w\s\+\-\*\/\=\(\)\[\]\{\}\<\>\^\%]', ' ', text)
         
         # Normalisasi spasi menjadi spasi tunggal
         text = re.sub(r'\s+', ' ', text).strip()
@@ -150,6 +162,30 @@ def normalize_for_search(text: str) -> str:
     except Exception as e:
         logger.error(f"Error normalizing text: {e}")
         return clean_text(text).lower()
+
+def normalize_math_expression(text: str) -> str:
+    """Normalisasi khusus untuk ekspresi matematika"""
+    try:
+        # Standardisasi notasi matematika
+        math_replacements = {
+            r'\bx\s*\*\s*y': 'x*y',  # Hilangkan spasi antara variabel dan *
+            r'\b(\d+)\s*\*\s*([a-z])': r'\1*\2',  # 2 * x → 2*x
+            r'\b([a-z])\s*\*\s*(\d+)': r'\1*\2',  # x * 2 → x*2
+            r'\^': '**',  # Pangkat: ^ → **
+            r'\s*=\s*': '=',  # Hilangkan spasi sekitar =
+            r'\s*\+\s*': '+',  # Hilangkan spasi sekitar +
+            r'\s*-\s*': '-',  # Hilangkan spasi sekitar -
+            r'\s*\*\s*': '*',  # Hilangkan spasi sekitar *
+            r'\s*/\s*': '/',  # Hilangkan spasi sekitar /
+        }
+        
+        for pattern, replacement in math_replacements.items():
+            text = re.sub(pattern, replacement, text)
+        
+        return text
+    except Exception as e:
+        logger.error(f"Error normalizing math expression: {e}")
+        return text
 
 def extract_keywords(text: str) -> List[str]:
     """Ekstrak kata kunci dengan pendekatan yang lebih baik"""
@@ -177,41 +213,88 @@ def extract_keywords(text: str) -> List[str]:
         return []
 
 def calculate_text_similarity(text1: str, text2: str) -> float:
-    """Hitung similarity untuk teks tanpa tanda baca (sesuai format database)"""
+    """Hitung similarity dengan penanganan khusus untuk matematika"""
     try:
-        # Kedua teks sudah dalam format normalized (tanpa tanda baca)
-        if not text1 or not text2:
+        # Deteksi apakah teks mengandung ekspresi matematika
+        math_pattern = r'[0-9+\-*/=^%]'
+        is_math1 = bool(re.search(math_pattern, text1))
+        is_math2 = bool(re.search(math_pattern, text2))
+        
+        # Jika keduanya ekspresi matematika, gunakan normalisasi khusus
+        if is_math1 and is_math2:
+            text1_norm = normalize_math_expression(text1)
+            text2_norm = normalize_math_expression(text2)
+        else:
+            text1_norm = text1
+            text2_norm = text2
+        
+        # Kedua teks sudah dalam format normalized
+        if not text1_norm or not text2_norm:
             return 0.0
         
         # 1. Exact match check dulu
-        if text1 == text2:
+        if text1_norm == text2_norm:
             return 1.0
         
         # 2. Sequence similarity untuk keseluruhan
-        seq_similarity = SequenceMatcher(None, text1, text2).ratio()
+        seq_similarity = SequenceMatcher(None, text1_norm, text2_norm).ratio()
         
-        # 3. Word-level similarity
-        words1 = text1.split()
-        words2 = text2.split()
+        # 3. Word-level similarity dengan mempertimbangkan urutan
+        words1 = text1_norm.split()
+        words2 = text2_norm.split()
         
         if not words1 or not words2:
             return seq_similarity * 0.3
         
-        # Hitung word overlap
+        # Hitung word overlap dengan bobot untuk posisi
         set1, set2 = set(words1), set(words2)
         intersection = len(set1 & set2)
         union = len(set1 | set2)
         word_similarity = intersection / union if union > 0 else 0.0
         
+        # Hitung ordered similarity (memperhatikan urutan kata)
+        ordered_similarity = 0.0
+        if len(words1) <= len(words2):
+            shorter, longer = words1, words2
+        else:
+            shorter, longer = words2, words1
+            
+        # Cari subsequence terbaik
+        for i in range(len(longer) - len(shorter) + 1):
+            subseq = longer[i:i+len(shorter)]
+            match_count = sum(1 for j in range(len(shorter)) if shorter[j] == subseq[j])
+            ordered_similarity = max(ordered_similarity, match_count / len(shorter))
+        
         # 4. Length similarity (penalti untuk perbedaan panjang yang ekstrem)
         len_ratio = min(len(words1), len(words2)) / max(len(words1), len(words2))
         
         # 5. Important word bonus
-        important_matches = (set1 & set2) & {word.replace(',', '').replace('.', '') for word in IMPORTANT_WORDS}
+        important_matches = (set1 & set2) & IMPORTANT_WORDS
         important_bonus = len(important_matches) * 0.15
         
-        # Weighted combination
-        final_score = (seq_similarity * 0.2) + (word_similarity * 0.6) + (len_ratio * 0.2) + important_bonus
+        # 6. Math expression bonus
+        math_bonus = 0.0
+        if is_math1 and is_math2:
+            math_bonus = 0.2  # Bonus khusus untuk ekspresi matematika
+            
+        # 7. Question type bonus
+        question_bonus = 0.0
+        for q_type, patterns in QUESTION_PATTERNS.items():
+            for pattern in patterns:
+                if pattern in text1_norm and pattern in text2_norm:
+                    question_bonus += 0.1
+                    break
+        
+        # Weighted combination dengan bobot yang disesuaikan
+        final_score = (
+            seq_similarity * 0.15 + 
+            word_similarity * 0.35 + 
+            ordered_similarity * 0.25 + 
+            len_ratio * 0.05 + 
+            important_bonus + 
+            math_bonus +
+            question_bonus
+        )
         
         return min(final_score, 1.0)
     except Exception as e:
@@ -345,8 +428,8 @@ def find_answer_from_question(question: str) -> str:
             logger.info("Ditemukan exact match")
             return exact_answer
         
-        # FASE 2: Fuzzy Search dengan Similarity
-        fuzzy_answer = search_with_similarity(question_normalized, threshold=0.7)
+        # FASE 2: Fuzzy Search dengan Similarity (threshold tinggi)
+        fuzzy_answer = search_with_similarity(question_normalized, threshold=0.75)
         if fuzzy_answer:
             logger.info("Ditemukan dengan fuzzy search (high threshold)")
             return fuzzy_answer
@@ -358,7 +441,7 @@ def find_answer_from_question(question: str) -> str:
             return keyword_answer
         
         # FASE 4: Lowered threshold fuzzy search
-        fuzzy_answer_low = search_with_similarity(question_normalized, threshold=0.5)
+        fuzzy_answer_low = search_with_similarity(question_normalized, threshold=0.55)
         if fuzzy_answer_low:
             logger.info("Ditemukan dengan fuzzy search (low threshold)")
             return fuzzy_answer_low
@@ -418,7 +501,7 @@ def search_with_similarity(question_normalized: str, threshold: float = 0.7) -> 
         SELECT answer, question_normalized 
         FROM `{TABLE_REF}`
         WHERE {where_clause}
-        LIMIT 200
+        LIMIT 300
         """
         
         query_job = bq_client.query(query)
@@ -448,7 +531,7 @@ def search_with_similarity(question_normalized: str, threshold: float = 0.7) -> 
         return None
 
 def search_with_keywords(question_normalized: str, question_types: List[str]) -> Optional[str]:
-    """Pencarian berdasarkan kata kunci"""
+    """Pencarian berdasarkan kata kunci dengan pendekatan yang lebih baik"""
     try:
         keywords = extract_keywords(question_normalized)
         
@@ -481,7 +564,7 @@ def search_with_keywords(question_normalized: str, question_types: List[str]) ->
         FROM `{TABLE_REF}`
         WHERE {where_clause}
         ORDER BY keyword_matches DESC
-        LIMIT 20
+        LIMIT 30
         """
         
         query_job = bq_client.query(query)
@@ -494,7 +577,7 @@ def search_with_keywords(question_normalized: str, question_types: List[str]) ->
         best_match = None
         best_score = 0
         
-        for row in results[:10]:  # Evaluasi top 10 candidates
+        for row in results[:15]:  # Evaluasi top 15 candidates
             score = calculate_text_similarity(question_normalized, row.question_normalized)
             
             # Beri bonus untuk matches dengan keyword lebih banyak
@@ -1142,7 +1225,7 @@ def main():
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("tambah", tambah_soal))
         application.add_handler(CommandHandler("ocr", ocr_command))
-        application.add_handler(CommandHandler("debug", debug_command))  # Tambah debug handler
+        application.add_handler(CommandHandler("debug", debug_command))
         
         # Message handlers - urutan penting!
         application.add_handler(MessageHandler(
@@ -1180,4 +1263,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
