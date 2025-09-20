@@ -85,6 +85,30 @@ def initialize_services():
         logger.error(f"Gagal menginisialisasi services: {e}")
         raise
 
+def clean_question_aggressively(question: str) -> str:
+    """Membersihkan pertanyaan secara agresif: hapus tanda baca, huruf kecil, hapus spasi berlebih"""
+    try:
+        # Konversi ke bentuk unicode NFKD untuk menangani karakter khusus
+        normalized = unicodedata.normalize('NFKD', question)
+        
+        # Hapus semua tanda baca
+        normalized = re.sub(r'[^\w\s]', ' ', normalized)
+        
+        # Ubah ke lowercase
+        normalized = normalized.lower()
+        
+        # Hapus spasi berlebih
+        normalized = re.sub(r'\s+', ' ', normalized)
+        
+        # Hapus spasi di awal dan akhir
+        result = normalized.strip()
+        
+        logger.info(f"Pembersihan agresif pertanyaan: '{question}' -> '{result}'")
+        return result
+    except Exception as e:
+        logger.error(f"Error pembersihan agresif pertanyaan: {e}")
+        return question.lower().strip()
+
 def normalize_question(question: str) -> str:
     """Normalisasi pertanyaan untuk pencarian - mempertahankan beberapa karakter penting"""
     try:
@@ -363,8 +387,11 @@ def find_answer_from_question(question: str) -> str:
             logger.error("BigQuery client tidak tersedia")
             return "Maaf, database sedang tidak tersedia. Silakan coba lagi nanti."
         
+        # Bersihkan pertanyaan secara agresif terlebih dahulu
+        question_cleaned = clean_question_aggressively(question)
+        
         # Cek dulu apakah pertanyaan termasuk pertanyaan singkat
-        short_answer = handle_short_questions(question)
+        short_answer = handle_short_questions(question_cleaned)
         if short_answer:
             return short_answer
         
@@ -372,11 +399,11 @@ def find_answer_from_question(question: str) -> str:
         question_normalized = normalize_question(question)
         
         # Validasi panjang pertanyaan
-        if len(question_normalized) < 2:
-            logger.warning(f"Pertanyaan terlalu pendek: '{question}' -> '{question_normalized}'")
+        if len(question_cleaned) < 2:
+            logger.warning(f"Pertanyaan terlalu pendek: '{question}' -> '{question_cleaned}'")
             return "Pertanyaan terlalu pendek. Silakan berikan pertanyaan yang lebih lengkap."
         
-        logger.info(f"Mencari jawaban untuk: '{question}' (normalized: '{question_normalized}')")
+        logger.info(f"Mencari jawaban untuk: '{question}' (cleaned: '{question_cleaned}', normalized: '{question_normalized}')")
         
         # Langkah 1: Cari exact match di question_normalized
         try:
@@ -456,14 +483,10 @@ def find_answer_from_question(question: str) -> str:
         
         # Langkah 4: Pencarian dengan kata kunci dari normalisasi agresif
         try:
-            # Buat versi normalisasi yang sangat agresif (tanpa tanda baca sama sekali)
-            very_aggressive_normalized = re.sub(r'[^\w\s]', ' ', question_normalized)
-            very_aggressive_normalized = re.sub(r'\s+', ' ', very_aggressive_normalized).strip()
-            
-            # Ambil kata-kata kunci
-            words = very_aggressive_normalized.split()
+            # Ambil kata-kata kunci dari pertanyaan yang sudah dibersihkan
+            words = question_cleaned.split()
             if not words:
-                raise ValueError("No words found after aggressive normalization")
+                raise ValueError("No words found after aggressive cleaning")
             
             # Buat kondisi LIKE untuk setiap kata
             conditions = []
@@ -493,11 +516,10 @@ def find_answer_from_question(question: str) -> str:
                 
                 for row in results:
                     # Normalisasi agresif untuk data di database
-                    db_aggressive = re.sub(r'[^\w\s]', ' ', row.question_normalized)
-                    db_aggressive = re.sub(r'\s+', ' ', db_aggressive).strip()
+                    db_cleaned = clean_question_aggressively(row.question_normalized)
                     
                     # Hitung kemiripan
-                    score = calculate_similarity(very_aggressive_normalized, db_aggressive)
+                    score = calculate_similarity(question_cleaned, db_cleaned)
                     
                     if score > best_score:
                         best_score = score
