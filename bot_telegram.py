@@ -86,13 +86,14 @@ def initialize_services():
         raise
 
 def normalize_question(question: str) -> str:
-    """Normalisasi pertanyaan untuk pencarian - menghapus tanda baca dan spasi berlebih"""
+    """Normalisasi pertanyaan untuk pencarian - mempertahankan beberapa karakter penting"""
     try:
         # Konversi ke bentuk unicode NFKD untuk menangani karakter khusus
         normalized = unicodedata.normalize('NFKD', question)
         
-        # Hapus karakter non-ASCII kecuali spasi
-        normalized = re.sub(r'[^\w\s]', '', normalized)
+        # Hapus karakter non-ASCII kecuali spasi dan beberapa tanda baca penting
+        # Kita pertahankan titik dua (:), titik koma (;), dan tanda hubung (-) karena sering muncul dalam pilihan jawaban
+        normalized = re.sub(r'[^\w\s:;\-]', ' ', normalized)
         
         # Ubah ke lowercase
         normalized = normalized.lower()
@@ -355,7 +356,7 @@ def find_question_answer_columns(headers: List[str]) -> Tuple[List[int], List[in
     return question_indices, answer_indices
 
 def find_answer_from_question(question: str) -> str:
-    """Mencari jawaban dari database berdasarkan pertanyaan dengan pendekatan bertahap"""
+    """Mencari jawaban dari database berdasarkan pertanyaan dengan pendekatan bertahap yang ditingkatkan"""
     try:
         # Periksa koneksi database
         if bq_client is None:
@@ -425,7 +426,35 @@ def find_answer_from_question(question: str) -> str:
         except Exception as e:
             logger.error(f"Error pada query exact match question: {e}")
         
-        # Langkah 3: Jika masih tidak ditemukan, cari dengan kemiripan kata kunci
+        # Langkah 3: Coba dengan normalisasi yang berbeda - hapus semua tanda baca
+        try:
+            # Buat versi normalisasi yang lebih agresif (tanpa tanda baca sama sekali)
+            aggressive_normalized = re.sub(r'[^\w\s]', ' ', question_normalized)
+            aggressive_normalized = re.sub(r'\s+', ' ', aggressive_normalized).strip()
+            
+            query = """
+            SELECT answer 
+            FROM `{0}` 
+            WHERE REPLACE(REPLACE(question_normalized, ':', ' '), ';', ' ') = @aggressive_normalized
+            LIMIT 1
+            """.format(TABLE_REF)
+            
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("aggressive_normalized", "STRING", aggressive_normalized)
+                ]
+            )
+            
+            query_job = bq_client.query(query, job_config=job_config)
+            results = list(query_job.result())
+            
+            if results:
+                logger.info("Ditemukan exact match dengan normalisasi agresif")
+                return results[0].answer
+        except Exception as e:
+            logger.error(f"Error pada query normalisasi agresif: {e}")
+        
+        # Langkah 4: Jika masih tidak ditemukan, cari dengan kemiripan kata kunci
         try:
             # Ekstrak kata kunci dari pertanyaan
             keywords = get_keywords(question_normalized)
@@ -479,8 +508,8 @@ def find_answer_from_question(question: str) -> str:
                     best_match = row.answer
                     logger.debug(f"New best match: score={best_score:.3f}, answer={best_match[:50]}...")
             
-            # Threshold untuk kemiripan
-            if best_match and best_score > 0.3:
+            # Threshold untuk kemiripan - turunkan sedikit untuk menangkap lebih banyak kemungkinan
+            if best_match and best_score > 0.25:  # Diturunkan dari 0.3 ke 0.25
                 logger.info(f"Ditemukan jawaban dengan skor kemiripan {best_score:.3f}: {best_match}")
                 return best_match
             else:
