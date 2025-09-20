@@ -85,11 +85,11 @@ def initialize_services():
         logger.error(f"Gagal menginisialisasi services: {e}")
         raise
 
-def clean_question_aggressively(question: str) -> str:
-    """Membersihkan pertanyaan secara agresif: hapus tanda baca, huruf kecil, hapus spasi berlebih"""
+def normalize_text(text: str) -> str:
+    """Normalisasi teks: hapus semua tanda baca dan spasi berlebih"""
     try:
         # Konversi ke bentuk unicode NFKD untuk menangani karakter khusus
-        normalized = unicodedata.normalize('NFKD', question)
+        normalized = unicodedata.normalize('NFKD', text)
         
         # Hapus semua tanda baca
         normalized = re.sub(r'[^\w\s]', ' ', normalized)
@@ -103,36 +103,11 @@ def clean_question_aggressively(question: str) -> str:
         # Hapus spasi di awal dan akhir
         result = normalized.strip()
         
-        logger.info(f"Pembersihan agresif pertanyaan: '{question}' -> '{result}'")
+        logger.info(f"Normalisasi teks: '{text}' -> '{result}'")
         return result
     except Exception as e:
-        logger.error(f"Error pembersihan agresif pertanyaan: {e}")
-        return question.lower().strip()
-
-def normalize_question(question: str) -> str:
-    """Normalisasi pertanyaan untuk pencarian - mempertahankan beberapa karakter penting"""
-    try:
-        # Konversi ke bentuk unicode NFKD untuk menangani karakter khusus
-        normalized = unicodedata.normalize('NFKD', question)
-        
-        # Hapus karakter non-ASCII kecuali spasi dan beberapa tanda baca penting
-        # Kita pertahankan titik dua (:), titik koma (;), dan tanda hubung (-) karena sering muncul dalam pilihan jawaban
-        normalized = re.sub(r'[^\w\s:;\-]', ' ', normalized)
-        
-        # Ubah ke lowercase
-        normalized = normalized.lower()
-        
-        # Hapus spasi berlebih
-        normalized = re.sub(r'\s+', ' ', normalized)
-        
-        # Hapus spasi di awal dan akhir
-        result = normalized.strip()
-        
-        logger.info(f"Normalisasi pertanyaan: '{question}' -> '{result}'")
-        return result
-    except Exception as e:
-        logger.error(f"Error normalisasi pertanyaan: {e}")
-        return question.lower().strip()
+        logger.error(f"Error normalisasi teks: {e}")
+        return text.lower().strip()
 
 def clean_ocr_text(text: str) -> str:
     """Membersihkan teks hasil OCR dari format tambahan seperti timestamp"""
@@ -154,7 +129,7 @@ def clean_ocr_text(text: str) -> str:
 def get_keywords(text: str) -> List[str]:
     """Ekstrak kata kunci dari teks"""
     # Normalisasi teks terlebih dahulu
-    normalized_text = normalize_question(text)
+    normalized_text = normalize_text(text)
     words = normalized_text.split()
     keywords = []
     
@@ -167,8 +142,8 @@ def get_keywords(text: str) -> List[str]:
 def calculate_similarity(query: str, document: str) -> float:
     """Hitung kemiripan sederhana antara query dan document"""
     # Normalisasi keduanya sebelum perbandingan
-    normalized_query = normalize_question(query)
-    normalized_document = normalize_question(document)
+    normalized_query = normalize_text(query)
+    normalized_document = normalize_text(document)
     
     query_words = set(get_keywords(normalized_query))
     doc_words = set(get_keywords(normalized_document))
@@ -188,14 +163,14 @@ def calculate_similarity(query: str, document: str) -> float:
 def is_except_question(question: str) -> bool:
     """Mendeteksi apakah pertanyaan mengandung kata 'kecuali'"""
     # Normalisasi pertanyaan sebelum pengecekan
-    normalized_question = normalize_question(question)
+    normalized_question = normalize_text(question)
     except_keywords = ['kecuali', 'bukan', 'tidak termasuk', 'kecuali']
     return any(keyword in normalized_question for keyword in except_keywords)
 
 def handle_short_questions(question: str) -> str:
     """Menangani pertanyaan singkat yang umum"""
     # Normalisasi pertanyaan sebelum pencocokan
-    normalized_question = normalize_question(question)
+    normalized_question = normalize_text(question)
     
     # Daftar pertanyaan singkat dan jawabannya
     short_answers = {
@@ -207,7 +182,7 @@ def handle_short_questions(question: str) -> str:
     
     # Cocokkan dengan versi normalisasi
     for key, value in short_answers.items():
-        if normalize_question(key) == normalized_question:
+        if normalize_text(key) == normalized_question:
             return value
     
     return ""
@@ -225,7 +200,7 @@ def simpan_soal(question: str, answer: str, source: str = "manual") -> bool:
             return False
 
         # Normalisasi pertanyaan
-        question_normalized = normalize_question(question)
+        question_normalized = normalize_text(question)
 
         # Cek duplikat berdasarkan question_normalized
         query = f"""
@@ -380,30 +355,27 @@ def find_question_answer_columns(headers: List[str]) -> Tuple[List[int], List[in
     return question_indices, answer_indices
 
 def find_answer_from_question(question: str) -> str:
-    """Mencari jawaban dari database berdasarkan pertanyaan dengan pendekatan bertahap yang ditingkatkan"""
+    """Mencari jawaban dari database berdasarkan pertanyaan dengan pendekatan bertahap yang diperbaiki"""
     try:
         # Periksa koneksi database
         if bq_client is None:
             logger.error("BigQuery client tidak tersedia")
             return "Maaf, database sedang tidak tersedia. Silakan coba lagi nanti."
         
-        # Bersihkan pertanyaan secara agresif terlebih dahulu
-        question_cleaned = clean_question_aggressively(question)
+        # Normalisasi pertanyaan (hapus semua tanda baca dan spasi berlebih)
+        question_normalized = normalize_text(question)
         
         # Cek dulu apakah pertanyaan termasuk pertanyaan singkat
-        short_answer = handle_short_questions(question_cleaned)
+        short_answer = handle_short_questions(question_normalized)
         if short_answer:
             return short_answer
         
-        # Normalisasi pertanyaan untuk pencarian
-        question_normalized = normalize_question(question)
-        
         # Validasi panjang pertanyaan
-        if len(question_cleaned) < 2:
-            logger.warning(f"Pertanyaan terlalu pendek: '{question}' -> '{question_cleaned}'")
+        if len(question_normalized) < 2:
+            logger.warning(f"Pertanyaan terlalu pendek: '{question}' -> '{question_normalized}'")
             return "Pertanyaan terlalu pendek. Silakan berikan pertanyaan yang lebih lengkap."
         
-        logger.info(f"Mencari jawaban untuk: '{question}' (cleaned: '{question_cleaned}', normalized: '{question_normalized}')")
+        logger.info(f"Mencari jawaban untuk: '{question}' (normalized: '{question_normalized}')")
         
         # Langkah 1: Cari exact match di question_normalized
         try:
@@ -429,64 +401,12 @@ def find_answer_from_question(question: str) -> str:
         except Exception as e:
             logger.error(f"Error pada query exact match question_normalized: {e}")
         
-        # Langkah 2: Jika tidak ditemukan, cari exact match di question
+        # Langkah 2: Jika tidak ditemukan, lakukan fuzzy search dengan LIKE
         try:
-            query = """
-            SELECT answer 
-            FROM `{0}` 
-            WHERE question = @question
-            LIMIT 1
-            """.format(TABLE_REF)
-            
-            job_config = bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ScalarQueryParameter("question", "STRING", question)
-                ]
-            )
-            
-            query_job = bq_client.query(query, job_config=job_config)
-            results = list(query_job.result())
-            
-            if results:
-                logger.info("Ditemukan exact match di question")
-                return results[0].answer
-        except Exception as e:
-            logger.error(f"Error pada query exact match question: {e}")
-        
-        # Langkah 3: Coba dengan normalisasi yang berbeda - hapus semua tanda baca
-        try:
-            # Buat versi normalisasi yang lebih agresif (tanpa tanda baca sama sekali)
-            aggressive_normalized = re.sub(r'[^\w\s]', ' ', question_normalized)
-            aggressive_normalized = re.sub(r'\s+', ' ', aggressive_normalized).strip()
-            
-            query = """
-            SELECT answer 
-            FROM `{0}` 
-            WHERE REPLACE(REPLACE(question_normalized, ':', ' '), ';', ' ') = @aggressive_normalized
-            LIMIT 1
-            """.format(TABLE_REF)
-            
-            job_config = bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ScalarQueryParameter("aggressive_normalized", "STRING", aggressive_normalized)
-                ]
-            )
-            
-            query_job = bq_client.query(query, job_config=job_config)
-            results = list(query_job.result())
-            
-            if results:
-                logger.info("Ditemukan exact match dengan normalisasi agresif")
-                return results[0].answer
-        except Exception as e:
-            logger.error(f"Error pada query normalisasi agresif: {e}")
-        
-        # Langkah 4: Pencarian dengan kata kunci dari normalisasi agresif
-        try:
-            # Ambil kata-kata kunci dari pertanyaan yang sudah dibersihkan
-            words = question_cleaned.split()
+            # Ambil kata-kata kunci dari pertanyaan yang sudah dinormalisasi
+            words = question_normalized.split()
             if not words:
-                raise ValueError("No words found after aggressive cleaning")
+                raise ValueError("No words found after normalization")
             
             # Buat kondisi LIKE untuk setiap kata
             conditions = []
@@ -495,12 +415,12 @@ def find_answer_from_question(question: str) -> str:
                     conditions.append(f"question_normalized LIKE '%{word}%'")
             
             if not conditions:
-                raise ValueError("No valid conditions for aggressive search")
+                raise ValueError("No valid conditions for fuzzy search")
             
             where_clause = " AND ".join(conditions)
             
             query = f"""
-            SELECT answer, question_normalized, question
+            SELECT answer, question_normalized
             FROM `{TABLE_REF}`
             WHERE {where_clause}
             LIMIT 10
@@ -515,90 +435,25 @@ def find_answer_from_question(question: str) -> str:
                 best_score = 0
                 
                 for row in results:
-                    # Normalisasi agresif untuk data di database
-                    db_cleaned = clean_question_aggressively(row.question_normalized)
-                    
                     # Hitung kemiripan
-                    score = calculate_similarity(question_cleaned, db_cleaned)
+                    score = calculate_similarity(question_normalized, row.question_normalized)
                     
                     if score > best_score:
                         best_score = score
                         best_match = row.answer
-                        logger.debug(f"New best match (aggressive): score={best_score:.3f}, answer={best_match[:50]}...")
+                        logger.debug(f"New best match: score={best_score:.3f}, answer={best_match[:50]}...")
                 
                 # Threshold untuk kemiripan
-                if best_match and best_score > 0.8:  # Threshold tinggi karena ini perbandingan string yang sudah dinormalisasi
-                    logger.info(f"Ditemukan jawaban dengan pencarian agresif, skor {best_score:.3f}: {best_match}")
+                if best_match and best_score > 0.5:
+                    logger.info(f"Ditemukan jawaban dengan fuzzy search, skor {best_score:.3f}: {best_match}")
                     return best_match
         except Exception as e:
-            logger.error(f"Error pada query pencarian agresif: {e}")
+            logger.error(f"Error pada query fuzzy search: {e}")
         
-        # Langkah 5: Jika masih tidak ditemukan, cari dengan kemiripan kata kunci
-        try:
-            # Ekstrak kata kunci dari pertanyaan
-            keywords = get_keywords(question_normalized)
-            
-            if not keywords:
-                logger.warning("Tidak ada kata kunci yang ditemukan")
-                return "Jawaban tidak ditemukan di database. Coba gunakan kata kunci yang lebih spesifik."
-            
-            # Ambil 3 kata kunci terpanjang untuk filter
-            keywords.sort(key=len, reverse=True)
-            top_keywords = keywords[:3]
-            
-            # Buat query untuk mencari data yang mengandung kata kunci
-            conditions = []
-            for keyword in top_keywords:
-                conditions.append(f"question_normalized LIKE '%{keyword}%'")
-                conditions.append(f"question LIKE '%{keyword}%'")
-            
-            where_clause = " OR ".join(conditions)
-            
-            query = f"""
-            SELECT answer, question_normalized, question
-            FROM `{TABLE_REF}`
-            WHERE {where_clause}
-            LIMIT 100
-            """
-            
-            query_job = bq_client.query(query)
-            results = list(query_job.result())
-            
-            if not results:
-                logger.info("Tidak ditemukan data yang mengandung kata kunci")
-                return "Jawaban tidak ditemukan di database. Coba gunakan kata kunci yang lebih spesifik."
-            
-            # Hitung kemiripan untuk setiap hasil
-            best_match = None
-            best_score = 0
-            
-            for row in results:
-                # Hitung kemiripan dengan question_normalized
-                score_normalized = calculate_similarity(question_normalized, row.question_normalized)
+        # Langkah 3: Jika masih tidak ditemukan, balas "Jawaban tidak ditemukan"
+        logger.info("Jawaban tidak ditemukan di database")
+        return "Jawaban tidak ditemukan"
                 
-                # Hitung kemiripan dengan question asli
-                score_original = calculate_similarity(question_normalized, row.question)
-                
-                # Ambil skor tertinggi
-                score = max(score_normalized, score_original)
-                
-                if score > best_score:
-                    best_score = score
-                    best_match = row.answer
-                    logger.debug(f"New best match: score={best_score:.3f}, answer={best_match[:50]}...")
-            
-            # Threshold untuk kemiripan - turunkan sedikit untuk menangkap lebih banyak kemungkinan
-            if best_match and best_score > 0.25:  # Diturunkan dari 0.3 ke 0.25
-                logger.info(f"Ditemukan jawaban dengan skor kemiripan {best_score:.3f}: {best_match}")
-                return best_match
-            else:
-                logger.info(f"Tidak ditemukan jawaban yang cukup mirip (best score: {best_score:.3f})")
-                return "Jawaban tidak ditemukan di database. Coba gunakan kata kunci yang lebih spesifik."
-                
-        except Exception as e:
-            logger.error(f"Error pada query kemiripan: {e}")
-            return "Maaf, terjadi kesalahan saat mencari jawaban. Silakan coba lagi nanti."
-            
     except Exception as e:
         logger.error(f"Error mencari jawaban: {str(e)}", exc_info=True)
         logger.error(f"Pertanyaan yang dicari: {question}")
@@ -919,3 +774,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
