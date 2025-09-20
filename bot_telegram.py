@@ -547,7 +547,7 @@ def ocr_with_ocr_space(image_content: bytes) -> str:
         payload = {
             'isOverlayRequired': False,
             'apikey': OCR_SPACE_API_KEY,
-            'language': 'ind',
+            'language': 'eng',
             'OCREngine': 2  # Gunakan engine yang lebih baik
         }
         
@@ -1165,3 +1165,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
