@@ -28,8 +28,8 @@ logger = logging.getLogger(__name__)
 
 # Konfigurasi BigQuery
 PROJECT_ID = os.getenv("PROJECT_ID", "prime-chess-472020-b6")
-DATASET_ID = os.getenv("DATASET_ID", "Data")
-TABLE_ID = os.getenv("TABLE_ID", "Telegram-new")
+DATASET_ID = os.getenv("DATASET_ID", "bot_telegram_gabung")
+TABLE_ID = os.getenv("TABLE_ID", "banksoal_claned")
 TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 
 # OCR.Space API Key
@@ -79,7 +79,7 @@ def initialize_services():
             logger.info(f"Test koneksi BigQuery berhasil. Jumlah data: {results[0].count}")
             
             # Perbarui question_normalized untuk data yang belum ada atau salah
-            update_missing_normalized_questions()
+            update_all_normalized_questions()
         except Exception as e:
             logger.error(f"Test koneksi BigQuery gagal: {e}")
             
@@ -94,8 +94,8 @@ def normalize_question(question: str) -> str:
         # Konversi ke bentuk unicode NFKD untuk menangani karakter khusus
         normalized = unicodedata.normalize('NFKD', question)
         
-        # Hapus karakter non-ASCII kecuali spasi
-        normalized = re.sub(r'[^\w\s]', '', normalized)
+        # Hapus karakter khusus termasuk tanda kurung, titik, koma, dll
+        normalized = re.sub(r'[^\w\s]', ' ', normalized)
         
         # Ubah ke lowercase
         normalized = normalized.lower()
@@ -112,17 +112,33 @@ def normalize_question(question: str) -> str:
         logger.error(f"Error normalisasi pertanyaan: {e}")
         return question.lower().strip()
 
-def update_missing_normalized_questions():
-    """Perbarui question_normalized untuk data yang belum ada atau salah"""
+def normalize_for_flexible_search(question: str) -> str:
+    """Normalisasi tambahan untuk pencarian yang lebih fleksibel"""
     try:
-        logger.info("Memeriksa dan memperbarui question_normalized yang hilang atau salah...")
+        # Normalisasi standar dulu
+        normalized = normalize_question(question)
         
-        # Ambil data yang question_normalized-nya kosong atau tidak sesuai
+        # Hapus angka tunggal yang mungkin menjadi bagian dari format pertanyaan
+        normalized = re.sub(r'\b\d+\b', '', normalized)
+        
+        # Hapus spasi berlebih lagi
+        normalized = re.sub(r'\s+', ' ', normalized).strip()
+        
+        return normalized
+    except Exception as e:
+        logger.error(f"Error normalisasi fleksibel: {e}")
+        return normalize_question(question)
+
+def update_all_normalized_questions():
+    """Perbarui semua question_normalized di database"""
+    try:
+        logger.info("Memeriksa dan memperbarui semua question_normalized...")
+        
+        # Ambil semua data
         query = f"""
         SELECT id, question, question_normalized 
         FROM `{TABLE_REF}`
-        WHERE question_normalized IS NULL OR question_normalized = ''
-        LIMIT 1000
+        LIMIT 2000
         """
         
         query_job = bq_client.query(query)
@@ -132,13 +148,13 @@ def update_missing_normalized_questions():
             logger.info("Tidak ada data yang perlu diperbarui")
             return
         
-        logger.info(f"Ditemukan {len(results)} data yang perlu diperbarui")
+        logger.info(f"Ditemukan {len(results)} data yang akan diperiksa")
         
         # Siapkan data untuk diupdate
         rows_to_update = []
         for row in results:
             normalized = normalize_question(row.question)
-            if normalized != row.question_normalized:
+            if normalized != row.question_normalized or not row.question_normalized:
                 rows_to_update.append({
                     "id": row.id,
                     "question_normalized": normalized
@@ -151,8 +167,10 @@ def update_missing_normalized_questions():
                 logger.error(f"Error updating rows: {errors}")
             else:
                 logger.info(f"Berhasil memperbarui {len(rows_to_update)} data")
+        else:
+            logger.info("Semua data sudah memiliki question_normalized yang benar")
     except Exception as e:
-        logger.error(f"Error memperbarui question_normalized: {e}")
+        logger.error(f"Error memperbarui semua question_normalized: {e}")
 
 def clean_ocr_text(text: str) -> str:
     """Membersihkan teks hasil OCR dari format tambahan seperti timestamp"""
@@ -192,6 +210,27 @@ def calculate_similarity(query: str, document: str) -> float:
     
     query_words = set(get_keywords(normalized_query))
     doc_words = set(get_keywords(normalized_document))
+    
+    if not query_words or not doc_words:
+        return 0.0
+    
+    # Hitung intersection
+    intersection = query_words.intersection(doc_words)
+    
+    # Hitung union
+    union = query_words.union(doc_words)
+    
+    # Jaccard similarity
+    return len(intersection) / len(union) if union else 0
+
+def calculate_flexible_similarity(query: str, document: str) -> float:
+    """Hitung kemiripan dengan pendekatan yang lebih fleksibel"""
+    # Normalisasi fleksibel untuk keduanya
+    normalized_query = normalize_for_flexible_search(query)
+    normalized_document = normalize_for_flexible_search(document)
+    
+    query_words = set(normalized_query.split())
+    doc_words = set(normalized_document.split())
     
     if not query_words or not doc_words:
         return 0.0
@@ -472,78 +511,136 @@ def find_answer_from_question(question: str) -> str:
         except Exception as e:
             logger.error(f"Error pada query exact match question: {e}")
         
-        # Langkah 3: Jika masih tidak ditemukan, cari dengan kemiripan kata kunci
+        # Langkah 3: Jika masih tidak ditemukan, cari dengan kemiripan kata kunci (pendekatan standar)
         try:
             # Ekstrak kata kunci dari pertanyaan
             keywords = get_keywords(question_normalized)
             
             if not keywords:
                 logger.warning("Tidak ada kata kunci yang ditemukan")
+                # Lanjut ke langkah 4
+                pass
+            else:
+                # Ambil 3 kata kunci terpanjang untuk filter
+                keywords.sort(key=len, reverse=True)
+                top_keywords = keywords[:3]
+                
+                # Buat query untuk mencari data yang mengandung kata kunci
+                conditions = []
+                for keyword in top_keywords:
+                    conditions.append(f"question_normalized LIKE '%{keyword}%'")
+                    conditions.append(f"question LIKE '%{keyword}%'")
+                
+                where_clause = " OR ".join(conditions)
+                
+                query = f"""
+                SELECT answer, question_normalized, question, id
+                FROM `{TABLE_REF}`
+                WHERE {where_clause}
+                LIMIT 100
+                """
+                
+                query_job = bq_client.query(query)
+                results = list(query_job.result())
+                
+                if results:
+                    # Hitung kemiripan untuk setiap hasil
+                    best_match = None
+                    best_score = 0
+                    best_id = None
+                    
+                    for row in results:
+                        # Hitung kemiripan dengan question_normalized
+                        score_normalized = calculate_similarity(question_normalized, row.question_normalized)
+                        
+                        # Hitung kemiripan dengan question asli
+                        score_original = calculate_similarity(question_normalized, row.question)
+                        
+                        # Ambil skor tertinggi
+                        score = max(score_normalized, score_original)
+                        
+                        if score > best_score:
+                            best_score = score
+                            best_match = row.answer
+                            best_id = row.id
+                            logger.debug(f"New best match: score={best_score:.3f}, answer={best_match[:50]}...")
+                    
+                    # Threshold untuk kemiripan
+                    if best_match and best_score > 0.3:
+                        logger.info(f"Ditemukan jawaban dengan skor kemiripan {best_score:.3f}: {best_match}")
+                        
+                        # Jika skor kemiripan tinggi (>0.8), perbarui question_normalized untuk data ini
+                        if best_score > 0.8 and best_id:
+                            update_question_normalized_by_id(best_id, question_normalized)
+                        
+                        return best_match
+        except Exception as e:
+            logger.error(f"Error pada query kemiripan standar: {e}")
+        
+        # Langkah 4: Jika masih tidak ditemukan, gunakan pendekatan fleksibel (untuk pertanyaan dengan format khusus)
+        try:
+            # Normalisasi fleksibel
+            flexible_normalized = normalize_for_flexible_search(question)
+            
+            # Ambil kata kunci dari normalisasi fleksibel
+            flexible_keywords = [word for word in flexible_normalized.split() if len(word) > 3 and word not in STOPWORDS]
+            
+            if not flexible_keywords:
+                logger.warning("Tidak ada kata kunci fleksibel yang ditemukan")
                 return "Jawaban tidak ditemukan di database. Coba gunakan kata kunci yang lebih spesifik."
             
-            # Ambil 3 kata kunci terpanjang untuk filter
-            keywords.sort(key=len, reverse=True)
-            top_keywords = keywords[:3]
+            # Ambil 5 kata kunci terpanjang untuk filter
+            flexible_keywords.sort(key=len, reverse=True)
+            top_flexible_keywords = flexible_keywords[:5]
             
-            # Buat query untuk mencari data yang mengandung kata kunci
-            conditions = []
-            for keyword in top_keywords:
-                conditions.append(f"question_normalized LIKE '%{keyword}%'")
-                conditions.append(f"question LIKE '%{keyword}%'")
+            # Buat query untuk mencari data yang mengandung kata kunci fleksibel
+            flexible_conditions = []
+            for keyword in top_flexible_keywords:
+                flexible_conditions.append(f"question_normalized LIKE '%{keyword}%'")
+                flexible_conditions.append(f"question LIKE '%{keyword}%'")
             
-            where_clause = " OR ".join(conditions)
+            flexible_where_clause = " OR ".join(flexible_conditions)
             
-            query = f"""
+            flexible_query = f"""
             SELECT answer, question_normalized, question, id
             FROM `{TABLE_REF}`
-            WHERE {where_clause}
-            LIMIT 100
+            WHERE {flexible_where_clause}
+            LIMIT 200
             """
             
-            query_job = bq_client.query(query)
-            results = list(query_job.result())
+            flexible_query_job = bq_client.query(flexible_query)
+            flexible_results = list(flexible_query_job.result())
             
-            if not results:
-                logger.info("Tidak ditemukan data yang mengandung kata kunci")
-                return "Jawaban tidak ditemukan di database. Coba gunakan kata kunci yang lebih spesifik."
-            
-            # Hitung kemiripan untuk setiap hasil
-            best_match = None
-            best_score = 0
-            best_id = None
-            
-            for row in results:
-                # Hitung kemiripan dengan question_normalized
-                score_normalized = calculate_similarity(question_normalized, row.question_normalized)
+            if flexible_results:
+                # Hitung kemiripan fleksibel untuk setiap hasil
+                flexible_best_match = None
+                flexible_best_score = 0
+                flexible_best_id = None
                 
-                # Hitung kemiripan dengan question asli
-                score_original = calculate_similarity(question_normalized, row.question)
+                for row in flexible_results:
+                    # Hitung kemiripan fleksibel
+                    flexible_score = calculate_flexible_similarity(question, row.question)
+                    
+                    if flexible_score > flexible_best_score:
+                        flexible_best_score = flexible_score
+                        flexible_best_match = row.answer
+                        flexible_best_id = row.id
+                        logger.debug(f"New flexible best match: score={flexible_best_score:.3f}, answer={flexible_best_match[:50]}...")
                 
-                # Ambil skor tertinggi
-                score = max(score_normalized, score_original)
-                
-                if score > best_score:
-                    best_score = score
-                    best_match = row.answer
-                    best_id = row.id
-                    logger.debug(f"New best match: score={best_score:.3f}, answer={best_match[:50]}...")
-            
-            # Threshold untuk kemiripan
-            if best_match and best_score > 0.3:
-                logger.info(f"Ditemukan jawaban dengan skor kemiripan {best_score:.3f}: {best_match}")
-                
-                # Jika skor kemiripan tinggi (>0.8), perbarui question_normalized untuk data ini
-                if best_score > 0.8 and best_id:
-                    update_question_normalized_by_id(best_id, question_normalized)
-                
-                return best_match
-            else:
-                logger.info(f"Tidak ditemukan jawaban yang cukup mirip (best score: {best_score:.3f})")
-                return "Jawaban tidak ditemukan di database. Coba gunakan kata kunci yang lebih spesifik."
-                
+                # Threshold untuk kemiripan fleksibel (lebih rendah karena ini pendekatan alternatif)
+                if flexible_best_match and flexible_best_score > 0.2:
+                    logger.info(f"Ditemukan jawaban dengan skor kemiripan fleksibel {flexible_best_score:.3f}: {flexible_best_match}")
+                    
+                    # Jika skor kemiripan tinggi (>0.7), perbarui question_normalized untuk data ini
+                    if flexible_best_score > 0.7 and flexible_best_id:
+                        update_question_normalized_by_id(flexible_best_id, question_normalized)
+                    
+                    return flexible_best_match
         except Exception as e:
-            logger.error(f"Error pada query kemiripan: {e}")
-            return "Maaf, terjadi kesalahan saat mencari jawaban. Silakan coba lagi nanti."
+            logger.error(f"Error pada query kemiripan fleksibel: {e}")
+        
+        logger.info("Tidak ditemukan jawaban yang cocok")
+        return "Jawaban tidak ditemukan di database. Coba gunakan kata kunci yang lebih spesifik."
             
     except Exception as e:
         logger.error(f"Error mencari jawaban: {str(e)}", exc_info=True)
