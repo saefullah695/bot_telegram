@@ -77,9 +77,6 @@ def initialize_services():
             query_job = bq_client.query(test_query)
             results = list(query_job.result())
             logger.info(f"Test koneksi BigQuery berhasil. Jumlah data: {results[0].count}")
-            
-            # Perbarui question_normalized untuk data yang belum ada atau salah
-            update_all_normalized_questions()
         except Exception as e:
             logger.error(f"Test koneksi BigQuery gagal: {e}")
             
@@ -94,8 +91,8 @@ def normalize_question(question: str) -> str:
         # Konversi ke bentuk unicode NFKD untuk menangani karakter khusus
         normalized = unicodedata.normalize('NFKD', question)
         
-        # Hapus karakter khusus termasuk tanda kurung, titik, koma, dll
-        normalized = re.sub(r'[^\w\s]', ' ', normalized)
+        # Hapus karakter non-ASCII kecuali spasi
+        normalized = re.sub(r'[^\w\s]', '', normalized)
         
         # Ubah ke lowercase
         normalized = normalized.lower()
@@ -111,49 +108,6 @@ def normalize_question(question: str) -> str:
     except Exception as e:
         logger.error(f"Error normalisasi pertanyaan: {e}")
         return question.lower().strip()
-
-def update_all_normalized_questions():
-    """Perbarui semua question_normalized di database"""
-    try:
-        logger.info("Memeriksa dan memperbarui semua question_normalized...")
-        
-        # Ambil semua data
-        query = f"""
-        SELECT id, question, question_normalized 
-        FROM `{TABLE_REF}`
-        LIMIT 2000
-        """
-        
-        query_job = bq_client.query(query)
-        results = list(query_job.result())
-        
-        if not results:
-            logger.info("Tidak ada data yang perlu diperbarui")
-            return
-        
-        logger.info(f"Ditemukan {len(results)} data yang akan diperiksa")
-        
-        # Siapkan data untuk diupdate
-        rows_to_update = []
-        for row in results:
-            normalized = normalize_question(row.question)
-            if normalized != row.question_normalized or not row.question_normalized:
-                rows_to_update.append({
-                    "id": row.id,
-                    "question_normalized": normalized
-                })
-        
-        if rows_to_update:
-            # Update data di BigQuery
-            errors = bq_client.insert_json(TABLE_REF, rows_to_update)
-            if errors:
-                logger.error(f"Error updating rows: {errors}")
-            else:
-                logger.info(f"Berhasil memperbarui {len(rows_to_update)} data")
-        else:
-            logger.info("Semua data sudah memiliki question_normalized yang benar")
-    except Exception as e:
-        logger.error(f"Error memperbarui semua question_normalized: {e}")
 
 def clean_ocr_text(text: str) -> str:
     """Membersihkan teks hasil OCR dari format tambahan seperti timestamp"""
@@ -413,45 +367,20 @@ def find_answer_from_question(question: str) -> str:
         if short_answer:
             return short_answer
         
+        # Normalisasi pertanyaan untuk pencarian
+        question_normalized = normalize_question(question)
+        
         # Validasi panjang pertanyaan
-        if len(question.strip()) < 2:
-            logger.warning(f"Pertanyaan terlalu pendek: '{question}'")
+        if len(question_normalized) < 2:
+            logger.warning(f"Pertanyaan terlalu pendek: '{question}' -> '{question_normalized}'")
             return "Pertanyaan terlalu pendek. Silakan berikan pertanyaan yang lebih lengkap."
         
-        logger.info(f"Mencari jawaban untuk: '{question}'")
+        logger.info(f"Mencari jawaban untuk: '{question}' (normalized: '{question_normalized}')")
         
-        # Langkah 1: Cari exact match di kolom question (tanpa normalisasi)
+        # Langkah 1: Cari exact match di question_normalized
         try:
             query = """
-            SELECT answer, id 
-            FROM `{0}` 
-            WHERE question = @question
-            LIMIT 1
-            """.format(TABLE_REF)
-            
-            job_config = bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ScalarQueryParameter("question", "STRING", question)
-                ]
-            )
-            
-            query_job = bq_client.query(query, job_config=job_config)
-            results = list(query_job.result())
-            
-            if results:
-                logger.info("Ditemukan exact match di kolom question")
-                return results[0].answer
-        except Exception as e:
-            logger.error(f"Error pada query exact match question: {e}")
-        
-        # Langkah 2: Jika tidak ditemukan di question, normalisasi input user dan cari di question_normalized
-        try:
-            # Normalisasi input user (hapus tanda baca dan spasi berlebih)
-            question_normalized = normalize_question(question)
-            logger.info(f"Mencari di question_normalized dengan: '{question_normalized}'")
-            
-            query = """
-            SELECT answer, id 
+            SELECT answer 
             FROM `{0}` 
             WHERE question_normalized = @question_normalized
             LIMIT 1
@@ -467,14 +396,38 @@ def find_answer_from_question(question: str) -> str:
             results = list(query_job.result())
             
             if results:
-                logger.info("Ditemukan exact match di kolom question_normalized")
+                logger.info("Ditemukan exact match di question_normalized")
                 return results[0].answer
         except Exception as e:
             logger.error(f"Error pada query exact match question_normalized: {e}")
         
+        # Langkah 2: Jika tidak ditemukan, cari exact match di question
+        try:
+            query = """
+            SELECT answer 
+            FROM `{0}` 
+            WHERE question = @question
+            LIMIT 1
+            """.format(TABLE_REF)
+            
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("question", "STRING", question)
+                ]
+            )
+            
+            query_job = bq_client.query(query, job_config=job_config)
+            results = list(query_job.result())
+            
+            if results:
+                logger.info("Ditemukan exact match di question")
+                return results[0].answer
+        except Exception as e:
+            logger.error(f"Error pada query exact match question: {e}")
+        
         # Langkah 3: Jika masih tidak ditemukan, cari dengan kemiripan kata kunci
         try:
-            # Ekstrak kata kunci dari pertanyaan yang sudah dinormalisasi
+            # Ekstrak kata kunci dari pertanyaan
             keywords = get_keywords(question_normalized)
             
             if not keywords:
@@ -485,16 +438,16 @@ def find_answer_from_question(question: str) -> str:
             keywords.sort(key=len, reverse=True)
             top_keywords = keywords[:3]
             
-            # Buat query untuk mencari data yang mengandung kata kunci di kedua kolom
+            # Buat query untuk mencari data yang mengandung kata kunci
             conditions = []
             for keyword in top_keywords:
-                conditions.append(f"question LIKE '%{keyword}%'")
                 conditions.append(f"question_normalized LIKE '%{keyword}%'")
+                conditions.append(f"question LIKE '%{keyword}%'")
             
             where_clause = " OR ".join(conditions)
             
             query = f"""
-            SELECT answer, question, question_normalized, id
+            SELECT answer, question_normalized, question
             FROM `{TABLE_REF}`
             WHERE {where_clause}
             LIMIT 100
@@ -510,32 +463,25 @@ def find_answer_from_question(question: str) -> str:
             # Hitung kemiripan untuk setiap hasil
             best_match = None
             best_score = 0
-            best_id = None
             
             for row in results:
-                # Hitung kemiripan dengan question asli
-                score_original = calculate_similarity(question, row.question)
-                
                 # Hitung kemiripan dengan question_normalized
                 score_normalized = calculate_similarity(question_normalized, row.question_normalized)
                 
+                # Hitung kemiripan dengan question asli
+                score_original = calculate_similarity(question_normalized, row.question)
+                
                 # Ambil skor tertinggi
-                score = max(score_original, score_normalized)
+                score = max(score_normalized, score_original)
                 
                 if score > best_score:
                     best_score = score
                     best_match = row.answer
-                    best_id = row.id
                     logger.debug(f"New best match: score={best_score:.3f}, answer={best_match[:50]}...")
             
             # Threshold untuk kemiripan
             if best_match and best_score > 0.3:
                 logger.info(f"Ditemukan jawaban dengan skor kemiripan {best_score:.3f}: {best_match}")
-                
-                # Jika skor kemiripan tinggi (>0.8), perbarui question_normalized untuk data ini
-                if best_score > 0.8 and best_id:
-                    update_question_normalized_by_id(best_id, question_normalized)
-                
                 return best_match
             else:
                 logger.info(f"Tidak ditemukan jawaban yang cukup mirip (best score: {best_score:.3f})")
@@ -549,29 +495,6 @@ def find_answer_from_question(question: str) -> str:
         logger.error(f"Error mencari jawaban: {str(e)}", exc_info=True)
         logger.error(f"Pertanyaan yang dicari: {question}")
         return "Maaf, terjadi kesalahan saat mencari jawaban. Silakan coba lagi nanti."
-
-def update_question_normalized_by_id(id: str, question_normalized: str):
-    """Perbarui question_normalized berdasarkan ID"""
-    try:
-        query = f"""
-        UPDATE `{TABLE_REF}`
-        SET question_normalized = @question_normalized
-        WHERE id = @id
-        """
-        
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("question_normalized", "STRING", question_normalized),
-                bigquery.ScalarQueryParameter("id", "STRING", id)
-            ]
-        )
-        
-        query_job = bq_client.query(query, job_config=job_config)
-        query_job.result()  # Tunggu query selesai
-        
-        logger.info(f"Berhasil memperbarui question_normalized untuk ID: {id}")
-    except Exception as e:
-        logger.error(f"Error memperbarui question_normalized by ID: {e}")
 
 def process_csv_file(file_bytes: bytes) -> int:
     """Memproses file CSV tanpa menggunakan pandas"""
