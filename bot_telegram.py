@@ -544,11 +544,14 @@ def ocr_with_ocr_space(image_content: bytes) -> str:
             temp_file.write(image_content)
             temp_file_path = temp_file.name
         
+        # Perbaikan: gunakan language code yang valid untuk OCR.Space
         payload = {
             'isOverlayRequired': False,
             'apikey': OCR_SPACE_API_KEY,
-            'language': 'eng',
-            'OCREngine': 2  # Gunakan engine yang lebih baik
+            'language': 'eng',  # Gunakan 'eng' karena 'ind' tidak didukung
+            'OCREngine': 2,     # Engine 2 lebih baik untuk mixed content
+            'scale': True,      # Auto-scale image untuk hasil lebih baik
+            'isTable': False    # Tidak dalam format tabel
         }
         
         with open(temp_file_path, 'rb') as f:
@@ -562,17 +565,29 @@ def ocr_with_ocr_space(image_content: bytes) -> str:
         
         os.unlink(temp_file_path)
         
-        result = response.json()
+        if response.status_code != 200:
+            logger.error(f"OCR.Space HTTP error: {response.status_code}")
+            return ""
+        
+        try:
+            result = response.json()
+        except json.JSONDecodeError as e:
+            logger.error(f"OCR.Space JSON decode error: {e}")
+            return ""
         
         if result.get('OCRExitCode') == 1:
             parsed_results = result.get('ParsedResults', [])
             if parsed_results:
                 raw_text = parsed_results[0].get('ParsedText', '')
-                cleaned_text = clean_ocr_text(raw_text)
-                logger.info(f"OCR.Space: '{raw_text[:100]}...' -> '{cleaned_text[:100]}...'")
-                return cleaned_text
+                if raw_text:
+                    cleaned_text = clean_ocr_text(raw_text)
+                    logger.info(f"OCR.Space berhasil: '{raw_text[:50]}...' -> '{cleaned_text[:50]}...'")
+                    return cleaned_text
         else:
-            logger.error(f"OCR.Space error: {result.get('ErrorMessage', 'Unknown error')}")
+            error_message = result.get('ErrorMessage', ['Unknown error'])
+            if isinstance(error_message, list):
+                error_message = ', '.join(error_message)
+            logger.error(f"OCR.Space error: {error_message}")
             
         return ""
     except Exception as e:
@@ -735,7 +750,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/start - Memulai bot\n"
             "/help - Menampilkan bantuan ini\n"
             "/tambah [soal] | [jawaban] - Menambah soal ke database\n"
-            "/ocr - OCR pada gambar yang di-reply\n\n"
+            "/ocr - OCR pada gambar yang di-reply\n"
+            "/debug [pertanyaan] - Debug normalisasi teks\n\n"
             "CARA PENGGUNAAN:\n"
             "1. Ketik langsung pertanyaan untuk mencari jawaban\n"
             "2. Kirim gambar berisi pertanyaan\n"
@@ -800,6 +816,48 @@ async def tambah_soal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error di /tambah: {e}")
         await update.message.reply_text("Terjadi error saat menambah soal. Silakan coba lagi.")
+
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler untuk command /debug - untuk testing normalisasi"""
+    try:
+        user = update.effective_user
+        
+        if not context.args:
+            await update.message.reply_text(
+                "Format: /debug [pertanyaan]\n"
+                "Contoh: /debug Siapa presiden pertama Indonesia?"
+            )
+            return
+        
+        question = " ".join(context.args)
+        normalized = normalize_for_search(question)
+        keywords = extract_keywords(normalized)
+        
+        debug_text = (
+            f"🔍 DEBUG NORMALISASI\n\n"
+            f"Input: {question}\n"
+            f"Normalized: {normalized}\n"
+            f"Keywords: {keywords}\n\n"
+            f"📊 STATISTIK:\n"
+            f"- Panjang asli: {len(question)} karakter\n"
+            f"- Panjang normalized: {len(normalized)} karakter\n"
+            f"- Jumlah kata: {len(normalized.split())}\n"
+            f"- Jumlah keywords: {len(keywords)}"
+        )
+        
+        await update.message.reply_text(debug_text)
+        
+        # Test pencarian
+        if len(normalized) >= 3:
+            await update.message.reply_chat_action(action="typing")
+            answer = find_answer_from_question(question)
+            
+            result_text = f"🎯 HASIL PENCARIAN:\n{answer}"
+            await update.message.reply_text(result_text)
+        
+    except Exception as e:
+        logger.error(f"Error di /debug: {e}")
+        await update.message.reply_text("Terjadi error saat debugging.")
 
 async def cari_jawaban_teks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk mencari jawaban dari teks"""
@@ -1063,49 +1121,6 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MAIN FUNCTION
 # =======================
 
-async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk command /debug - untuk testing normalisasi"""
-    try:
-        user = update.effective_user
-        
-        if not context.args:
-            await update.message.reply_text(
-                "Format: /debug [pertanyaan]\n"
-                "Contoh: /debug Siapa presiden pertama Indonesia?"
-            )
-            return
-        
-        question = " ".join(context.args)
-        normalized = normalize_for_search(question)
-        keywords = extract_keywords(normalized)
-        
-        debug_text = (
-            f"🔍 DEBUG NORMALISASI\n\n"
-            f"Input: {question}\n"
-            f"Normalized: {normalized}\n"
-            f"Keywords: {keywords}\n\n"
-            f"📊 STATISTIK:\n"
-            f"- Panjang asli: {len(question)} karakter\n"
-            f"- Panjang normalized: {len(normalized)} karakter\n"
-            f"- Jumlah kata: {len(normalized.split())}\n"
-            f"- Jumlah keywords: {len(keywords)}"
-        )
-        
-        await update.message.reply_text(debug_text)
-        
-        # Test pencarian
-        if len(normalized) >= 3:
-            await update.message.reply_chat_action(action="typing")
-            answer = find_answer_from_question(question)
-            
-            result_text = f"🎯 HASIL PENCARIAN:\n{answer}"
-            await update.message.reply_text(result_text)
-        
-    except Exception as e:
-        logger.error(f"Error di /debug: {e}")
-        await update.message.reply_text("Terjadi error saat debugging.")
-
-# Tambahkan handler debug ke main function
 def main():
     """Fungsi utama untuk menjalankan bot"""
     try:
@@ -1165,4 +1180,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
