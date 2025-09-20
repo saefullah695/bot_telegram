@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # Konfigurasi BigQuery
 PROJECT_ID = os.getenv("PROJECT_ID", "prime-chess-472020-b6")
 DATASET_ID = os.getenv("DATASET_ID", "Data")
-TABLE_ID = os.getenv("TABLE_ID", "Telegram-new")
+TABLE_ID = os.getenv("TABLE_ID", "mtk")
 TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 
 # OCR.Space API Key
@@ -1263,3 +1263,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
